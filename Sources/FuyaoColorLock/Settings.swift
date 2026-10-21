@@ -1,33 +1,34 @@
 import Foundation
 
-/// Persisted configuration. Stored in UserDefaults so the app stays a single
-/// small binary without extra files.
+/// Per-display persisted configuration. Keys are the PhysicalDisplay id
+/// (product name + EDID digest) so settings survive reconnects.
 enum Settings {
-    enum Keys {
-        static let enabled = "guard.enabled"
-        static let displayName = "guard.displayName"
-        static let cliSpec = "guard.cliSpec"
-        static let launchAtLogin = "guard.launchAtLogin"
-        static let cliPath = "cli.path"
+    private static var defaults: UserDefaults { .standard }
+
+    private static func lockKey(_ displayID: String) -> String { "lock.\(displayID).enabled" }
+    private static func targetKey(_ displayID: String) -> String { "lock.\(displayID).targetModeID" }
+    private static let launchKey = "app.launchAtLogin"
+
+    static func isLocked(_ displayID: String) -> Bool {
+        defaults.bool(forKey: lockKey(displayID))
     }
 
-    static var isEnabled: Bool {
-        get { UserDefaults.standard.object(forKey: Keys.enabled) as? Bool ?? true }
-        set { UserDefaults.standard.set(newValue, forKey: Keys.enabled) }
+    static func setLocked(_ displayID: String, _ locked: Bool) {
+        defaults.set(locked, forKey: lockKey(displayID))
     }
 
-    static var displayName: String {
-        get { UserDefaults.standard.string(forKey: Keys.displayName) ?? "" }
-        set { UserDefaults.standard.set(newValue, forKey: Keys.displayName) }
+    /// Selected color mode entry id ("timingID-modeID"), or nil when nothing
+    /// is pinned yet (the default state).
+    static func targetModeID(_ displayID: String) -> String? {
+        defaults.string(forKey: targetKey(displayID))
     }
 
-    static var preset: ConnectionModePreset {
-        get {
-            let spec = UserDefaults.standard.string(forKey: Keys.cliSpec)
-                ?? ConnectionModePreset.presets[0].cliSpec
-            return ConnectionModePreset.presets.first { $0.cliSpec == spec }
-                ?? ConnectionModePreset.presets[0]
-        }
-        set { UserDefaults.standard.set(newValue.cliSpec, forKey: Keys.cliSpec) }
+    static func setTargetModeID(_ displayID: String, _ modeID: String?) {
+        defaults.set(modeID, forKey: targetKey(displayID))
+    }
+
+    static var anyLockEnabled: Bool {
+        guard let keys = defaults.dictionaryRepresentation().keys as? [String] else { return false }
+        return keys.contains { $0.hasPrefix("lock.") && $0.hasSuffix(".enabled") && defaults.bool(forKey: $0) }
     }
 }

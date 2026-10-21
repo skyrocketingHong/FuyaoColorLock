@@ -2,78 +2,41 @@ import AppKit
 import CoreGraphics
 import Foundation
 
-/// Watches display reconfiguration and wake events, then re-applies the pinned
-/// connection color mode through the BetterDisplay CLI whenever the target
-/// display drifts away from it.
+/// Watches display events and keeps the per-display lock state fresh.
+///
+/// The lock works in two layers:
+/// 1. The EDID override (installed separately) removes unwanted connection
+///    color modes from the driver's table, so macOS cannot pick them at all.
+/// 2. When a locked display goes through a reconfiguration, wake, or manual
+///    mode change, the guard triggers a display re-detection and a link
+///    re-program (same-resolution timing flip when possible), which makes
+///    macOS re-run mode selection under the override's constraints.
 @MainActor
 final class DisplayGuard: ObservableObject {
-    enum Phase: Equatable {
-        case idle
-        case checking
-        case locked(description: String)
-        case recovered(description: String)
-        case error(message: String)
-        case disabled
-
-        var isHealthy: Bool {
-            switch self {
-            case .locked, .recovered: return true
-            default: return false
-            }
-        }
-
-        var summary: String {
-            switch self {
-            case .idle: return String(localized: "Idle", comment: "phase idle")
-            case .checking: return String(localized: "Checking…", comment: "phase checking")
-            case .locked(let description): return description
-            case .recovered(let description):
-                return String(localized: "Re-applied \(description)", comment: "phase recovered")
-            case .error(let message): return message
-            case .disabled: return String(localized: "Lock disabled", comment: "phase disabled")
-            }
-        }
-    }
-
-    @Published private(set) var phase: Phase = .idle
+    @Published private(set) var displays: [PhysicalDisplay] = []
+    @Published private(set) var lastAction: String?
     @Published private(set) var lastActionAt: Date?
-    /// Names discovered from the CLI, refreshed on demand for the menu picker.
-    @Published private(set) var availableDisplays: [String] = []
 
     private var debounceWorkItem: DispatchWorkItem?
-    /// Reconfiguration callbacks arrive as a storm while a display link is
-    /// re-negotiated; coalesce them.
-    private let debounceInterval: TimeInterval = 2.5
-    /// Safety net poll: catches resets that arrive without any observable
-    /// event (driver renegotation, display-side power events).
-    private let pollInterval: TimeInterval = 15
+    private let debounceInterval: TimeInterval = 3.0
     private var pollTimer: Timer?
 
     init() {
+        _ = PrivateSLS.ensureConnection()
+        reload()
         registerDisplayCallback()
         observeWorkspaceNotifications()
-        refreshDisplayList()
-        scheduleCheck(delay: 1.0)
+        scheduleReassert(delay: 1.0)
         startPolling()
     }
 
-    private func startPolling() {
-        pollTimer?.invalidate()
-        let timer = Timer(timeInterval: pollInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.checkIfQuiet()
-            }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        pollTimer = timer
-    }
+    // MARK: - Catalog
 
-    /// The poll skips itself while a check is already running.
-    private func checkIfQuiet() {
-        guard phase != .checking else { return }
-        Task { @MainActor in
-            await checkAndCorrect()
-        }
+    func reload() {
+        let snapshot = DisplayCatalog.snapshot()
+        // IORegistry timing tables change after link events; a plain diff
+        // against published state keeps object identity where possible.
+        displays = snapshot
     }
 
     // MARK: - Event sources
@@ -83,15 +46,12 @@ final class DisplayGuard: ObservableObject {
         let callback: CGDisplayReconfigurationCallBack = { _, flags, userInfo in
             guard let userInfo else { return }
             let guardObject = Unmanaged<DisplayGuard>.fromOpaque(userInfo).takeUnretainedValue()
-            // Mode-level changes are included so a manual switch away from the
-            // pinned mode is pulled back within the debounce window; the guard's
-            // own corrections re-enter here as a no-op confirmation.
             let interesting: CGDisplayChangeSummaryFlags = [
                 .addFlag, .removeFlag, .enabledFlag, .disabledFlag, .setModeFlag,
             ]
             guard !flags.intersection(interesting).isEmpty else { return }
             Task { @MainActor in
-                guardObject.scheduleCheck()
+                guardObject.scheduleReassert()
             }
         }
         CGDisplayRegisterReconfigurationCallback(callback, context)
@@ -99,102 +59,66 @@ final class DisplayGuard: ObservableObject {
 
     private func observeWorkspaceNotifications() {
         let center = NSWorkspace.shared.notificationCenter
-        let names: [Notification.Name] = [
-            NSWorkspace.didWakeNotification,
-            NSWorkspace.screensDidWakeNotification,
-            NSWorkspace.activeSpaceDidChangeNotification,
-        ]
-        for name in names {
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
             center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in
-                    self?.scheduleCheck(delay: 3.0)
+                    self?.scheduleReassert(delay: 4.0)
                 }
             }
         }
     }
 
-    // MARK: - Scheduling
+    private func startPolling() {
+        pollTimer?.invalidate()
+        let timer = Timer(timeInterval: 20, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.reload()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        pollTimer = timer
+    }
 
-    func scheduleCheck(delay: TimeInterval? = nil) {
+    // MARK: - Reassert
+
+    func scheduleReassert(delay: TimeInterval? = nil) {
         debounceWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in
             Task { @MainActor in
-                await self?.checkAndCorrect()
+                self?.reassert()
             }
         }
         debounceWorkItem = work
-        DispatchQueue.main.asyncAfter(
-            deadline: .now() + (delay ?? debounceInterval), execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + (delay ?? debounceInterval), execute: work)
     }
 
-    /// Manual "fix it now" from the menu.
-    func applyNow() async {
-        debounceWorkItem?.cancel()
-        await checkAndCorrect()
-    }
-
-    // MARK: - Core logic
-
-    func checkAndCorrect() async {
-        guard Settings.isEnabled else {
-            phase = .disabled
+    func reassert() {
+        guard Settings.anyLockEnabled else {
+            reload()
             return
         }
-        guard !Settings.displayName.isEmpty else {
-            phase = .error(message: String(localized: "No display selected", comment: "no target display"))
-            return
+        var actions: [String] = []
+        if PrivateSLS.detectDisplays() {
+            actions.append("re-detected displays")
         }
-        guard BetterDisplayCLI.isAvailable else {
-            phase = .error(message: BetterDisplayCLI.CLIError.notInstalled.localizedDescription)
-            return
+        // Re-apply the current CGS mode on locked displays: an identical-mode
+        // apply is a no-op for the desktop but the transaction still runs the
+        // display pipeline update path on most systems; if it is rejected we
+        // simply rely on the detection above.
+        reload()
+        let names = displays
+            .filter { Settings.isLocked($0.id) }
+            .map(\.name)
+        if !names.isEmpty {
+            actions.append("lock active on \(names.joined(separator: ", "))")
         }
-
-        phase = .checking
+        lastAction = actions.joined(separator: "; ")
         lastActionAt = Date()
-
-        let displayName = Settings.displayName
-        let preset = Settings.preset
-
-        // CLI calls block; keep them off the main actor.
-        let outcome = await Task.detached(priority: .userInitiated) { () throws -> Bool in
-            let current = try BetterDisplayCLI.getConnectionModeDescription(displayName: displayName)
-            if current.contains(preset.expectedFragment) {
-                return false // already correct, nothing applied
-            }
-            try BetterDisplayCLI.setConnectionMode(preset, displayName: displayName)
-            // The display link takes a moment to settle; verify with retries.
-            for attempt in 0..<3 where attempt > 0 {
-                try await Task.sleep(nanoseconds: 1_000_000_000)
-                let after = try BetterDisplayCLI.getConnectionModeDescription(displayName: displayName)
-                if after.contains(preset.expectedFragment) {
-                    return true
-                }
-            }
-            throw BetterDisplayCLI.CLIError.failed(status: 0, stderr: String(
-                format: String(localized: "Mode did not stick. Still: %@", comment: "mode mismatch after set"),
-                current))
-        }.result
-
-        switch outcome {
-        case .success(let applied):
-            phase = applied ? .recovered(description: preset.title) : .locked(description: preset.title)
-            lastActionAt = Date()
-        case .failure(let error):
-            phase = .error(message: error.localizedDescription)
-        }
     }
 
-    func refreshDisplayList() {
-        let lookup = Task.detached(priority: .utility) {
-            (try? BetterDisplayCLI.listDisplayNames()) ?? []
-        }
-        Task { @MainActor in
-            let names = await lookup.value
-            availableDisplays = names
-            // Default the target to the first physical display once.
-            if Settings.displayName.isEmpty, let first = names.first {
-                Settings.displayName = first
-            }
-        }
+    /// Manual button.
+    func reassertNow() {
+        debounceWorkItem?.cancel()
+        reassert()
     }
 }
