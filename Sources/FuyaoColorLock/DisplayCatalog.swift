@@ -74,9 +74,12 @@ struct PhysicalDisplay: Identifiable, Hashable {
     let id: String
     let name: String
     let cgDirectDisplayID: CGDirectDisplayID
+    let uuidString: String?
     let timings: [DisplayTiming]
     /// `DPTimingModeId` registry value: ID of the currently active timing.
     let currentTimingID: Int?
+    /// Last configured connection mode from the WindowServer plist, if recorded.
+    let configuredLinkMode: LinkDescription?
 
     var currentTiming: DisplayTiming? {
         if let id = currentTimingID, let exact = timings.first(where: { $0.id == id }) {
@@ -93,6 +96,37 @@ struct PhysicalDisplay: Identifiable, Hashable {
     /// Color modes of the active timing, most preferred first.
     var currentModes: [ColorModeEntry] {
         (currentTiming?.modes ?? []).sorted { $0.score > $1.score }
+    }
+
+    /// The catalog entry matching the WindowServer-recorded link mode, if any.
+    var configuredModeEntry: ColorModeEntry? {
+        guard let link = configuredLinkMode else { return nil }
+        return currentModes.first { $0.pixelEncoding == link.pixelEncoding
+            && $0.depth == link.bitDepth
+            && $0.dynamicRange == link.range
+            && $0.eotf == link.eotf }
+    }
+}
+
+/// Connection format as recorded by WindowServer
+/// (`DisplaySets → Configs → DisplayConfig → LinkDescription`).
+struct LinkDescription: Hashable {
+    let range: Int
+    let bitDepth: Int
+    let eotf: Int
+    let pixelEncoding: Int
+
+    var title: String {
+        let enc: String
+        switch pixelEncoding {
+        case 0: enc = "RGB"
+        case 2: enc = "YCbCr 4:2:0"
+        case 3: enc = "YCbCr 4:4:4"
+        case 6: enc = "YCbCr 4:2:2"
+        default: enc = "Encoding \(pixelEncoding)"
+        }
+        let transfer = eotf == 0 ? "SDR" : (eotf == 2 ? "HDR10" : "HDR")
+        return "\(bitDepth)-bit \(transfer) \(enc) \(range == 1 ? "Full" : "Limited")"
     }
 }
 
@@ -111,6 +145,7 @@ enum DisplayCatalog {
 
         let shimsBySegment = framebufferShimsBySegment()
         let nameFor = Self.displayName
+        let linkModes = WindowServerLinkModes.load()
 
         var displays: [PhysicalDisplay] = []
         for displayID in ids.prefix(Int(count)) where CGDisplayIsBuiltin(displayID) == 0 {
@@ -118,14 +153,23 @@ enum DisplayCatalog {
                   let shim = shimsBySegment[segment],
                   let timings = shim.timings, !timings.isEmpty else { continue }
             let name = nameFor(displayID) ?? "Display"
+            let uuid = uuidString(of: displayID)
             displays.append(PhysicalDisplay(
                 id: "\(name)-\(displayID)",
                 name: name,
                 cgDirectDisplayID: displayID,
+                uuidString: uuid,
                 timings: timings,
-                currentTimingID: shim.currentTimingID))
+                currentTimingID: shim.currentTimingID,
+                configuredLinkMode: uuid.flatMap { linkModes[$0] }))
         }
         return displays
+    }
+
+    private static func uuidString(of displayID: CGDirectDisplayID) -> String? {
+        guard let uuid = SLSBridge.uuid(for: displayID) else { return nil }
+        guard let cfString = CFUUIDCreateString(nil, uuid) else { return nil }
+        return (cfString as String).uppercased()
     }
 
     // MARK: - CG display → controller segment
@@ -238,6 +282,13 @@ private enum SLSBridge {
         guard let raw = dlsym(handle, "SLSCopyDisplayInfoDictionary") else { return nil }
         return unsafeBitCast(raw, to: Fn.self)(display)
     }
+
+    /// `CGDisplayCreateUUIDFromDisplayID` lives in SkyLight on current macOS.
+    static func uuid(for display: CGDirectDisplayID) -> CFUUID? {
+        typealias Fn = @convention(c) (UInt32) -> CFUUID?
+        guard let handle, let raw = dlsym(handle, "CGDisplayCreateUUIDFromDisplayID") else { return nil }
+        return unsafeBitCast(raw, to: Fn.self)(display)
+    }
 }
 
 private enum CoreDisplayBridge {
@@ -247,5 +298,41 @@ private enum CoreDisplayBridge {
         typealias Fn = @convention(c) (UInt32) -> CFDictionary?
         guard let handle, let raw = dlsym(handle, "CoreDisplay_DisplayCreateInfoDictionary") else { return nil }
         return unsafeBitCast(raw, to: Fn.self)(display)
+    }
+
+}
+
+/// Reads the last recorded connection mode per display UUID from WindowServer's
+/// per-host plist. This records what macOS last configured, which is the best
+/// available "current mode" source without BetterDisplay.
+private enum WindowServerLinkModes {
+    static func load() -> [String: LinkDescription] {
+        let byHost = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Preferences/ByHost")
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: byHost, includingPropertiesForKeys: nil) else { return [:] }
+
+        var result: [String: LinkDescription] = [:]
+        for file in files where file.lastPathComponent.hasPrefix("com.apple.windowserver.displays.") {
+            guard let data = try? Data(contentsOf: file),
+                  let plist = try? PropertyListSerialization.propertyList(
+                    from: data, options: [], format: nil) as? [String: Any],
+                  let sets = plist["DisplaySets"] as? [String: Any],
+                  let configs = sets["Configs"] as? [[String: Any]] else { continue }
+            // Later config sets are newer; last write wins.
+            for config in configs {
+                guard let displayConfigs = config["DisplayConfig"] as? [[String: Any]] else { continue }
+                for dc in displayConfigs {
+                    guard let uuid = dc["UUID"] as? String,
+                          let link = dc["LinkDescription"] as? [String: Any] else { continue }
+                    result[uuid.uppercased()] = LinkDescription(
+                        range: link["Range"] as? Int ?? 0,
+                        bitDepth: link["BitDepth"] as? Int ?? 8,
+                        eotf: link["EOTF"] as? Int ?? 0,
+                        pixelEncoding: link["PixelEncoding"] as? Int ?? 0)
+                }
+            }
+        }
+        return result
     }
 }

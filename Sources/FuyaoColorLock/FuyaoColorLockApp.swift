@@ -24,27 +24,31 @@ private struct PanelContent: View {
     @State private var selectedDisplayID: String?
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
 
+    /// Critically-damped spring (Apple house style): no overshoot for a
+    /// panel resize that is not gesture-driven.
+    private let resize = Animation.spring(response: 0.35, dampingFraction: 1.0)
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             header
 
             if guard_.displays.isEmpty {
-                Text("No external display with a color mode table found.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .padding(.vertical, 8)
+                emptyState
             } else {
                 tabs
                 if let display = currentDisplay {
-                    DisplaySection(display: display)
+                    DisplaySection(display: display, guard_: guard_)
+                        .id(display.id)
+                        .transition(.opacity)
                 }
             }
 
             Divider()
             footer
         }
-        .padding(12)
-        .frame(width: 380)
+        .padding(14)
+        .frame(width: 400)
+        .animation(resize, value: selectedDisplayID)
         .onAppear {
             if selectedDisplayID == nil {
                 selectedDisplayID = guard_.displays.first?.id
@@ -57,18 +61,26 @@ private struct PanelContent: View {
     }
 
     private var header: some View {
-        HStack {
+        HStack(alignment: .firstTextBaseline) {
             Text("Fuyao Color Lock")
-                .font(.system(size: 13, weight: .semibold))
+                .font(.headline)
             Spacer()
             if let action = guard_.lastAction {
                 Text(action)
-                    .font(.system(size: 10))
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                    .help(action)
             }
         }
+    }
+
+    private var emptyState: some View {
+        Text("No external display with a color mode table found.")
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .padding(.vertical, 10)
     }
 
     private var tabs: some View {
@@ -88,15 +100,14 @@ private struct PanelContent: View {
     private var footer: some View {
         HStack {
             Toggle("Launch at Login", isOn: $launchAtLogin)
-                .font(.system(size: 11))
+                .font(.footnote)
                 .onChange(of: launchAtLogin) { enabled in
                     updateLoginItem(enabled)
                 }
             Spacer()
-            Button("Re-apply") { guard_.reassertNow() }
-                .font(.system(size: 11))
+            ReapplyButton { guard_.reassertNow() }
             Button("Quit") { NSApplication.shared.terminate(nil) }
-                .font(.system(size: 11))
+                .font(.footnote)
         }
     }
 
@@ -114,45 +125,82 @@ private struct PanelContent: View {
     }
 }
 
+/// Primary action: Liquid Glass on macOS 26+, plain equivalent elsewhere.
+private struct ReapplyButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        if #available(macOS 26.0, *) {
+            Button(action: action) {
+                Label("Re-apply", systemImage: "arrow.triangle.2.circlepath")
+                    .font(.footnote)
+            }
+            .buttonStyle(.glass)
+            .controlSize(.small)
+        } else {
+            Button(action: action) {
+                Label("Re-apply", systemImage: "arrow.triangle.2.circlepath")
+                    .font(.footnote)
+            }
+            .controlSize(.small)
+        }
+    }
+}
+
 /// One display tab: current timing, the color modes the driver actually
-/// offers on it, and an independent lock with its own pinned mode.
+/// offers on it, the macOS-recorded current mode, and an independent lock.
 private struct DisplaySection: View {
     let display: PhysicalDisplay
+    @ObservedObject var guard_: DisplayGuard
 
     private var savedTarget: String? { Settings.targetModeID(display.id) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
                 Text(display.name)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.subheadline.weight(.medium))
                 Spacer()
                 if let timing = display.currentTiming {
-                    Text("current timing: \(timing.label)")
-                        .font(.system(size: 10).monospaced())
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("timing unknown")
-                        .font(.system(size: 10))
+                    Text(timing.label)
+                        .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
             }
 
+            currentModeBanner
+
             Toggle("Lock color mode", isOn: lockBinding)
-                .font(.system(size: 11))
+                .font(.footnote)
 
             modeList
 
-            if let target = savedTarget, let entry = display.currentModes.first(where: { $0.id == target }) {
-                Text("Pinned: \(entry.title)")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("No mode pinned — macOS picks after each link reset. Select a mode to pin it.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-            }
+            hint
         }
+    }
+
+    private var currentModeBanner: some View {
+        HStack(spacing: 6) {
+            Image(systemName: display.configuredModeEntry != nil ? "checkmark.circle.fill" : "questionmark.circle")
+                .foregroundStyle(display.configuredModeEntry != nil ? .green : .secondary)
+            Text(currentModeText)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var currentModeText: String {
+        if let entry = display.configuredModeEntry {
+            return String(localized: "Current: \(entry.title)", comment: "current mode banner")
+        }
+        if let link = display.configuredLinkMode {
+            return String(localized: "Recorded: \(link.title)", comment: "recorded but unmatched")
+        }
+        return String(localized: "Current mode: chosen automatically by macOS", comment: "no record")
     }
 
     private var lockBinding: Binding<Bool> {
@@ -162,19 +210,32 @@ private struct DisplaySection: View {
         )
     }
 
-    /// Color modes of the active timing, most preferred first. Nothing is
-    /// selected by default; the top row reflects the driver preference.
+    /// Color modes of the active timing, most preferred first. The macOS-
+    /// recorded entry (when it matches a listed mode) is marked "current";
+    /// nothing is force-selected — pinning is an explicit user choice.
     private var modeList: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            let modes = display.currentTiming?.modes.sorted { $0.score > $1.score } ?? []
+        let modes = display.currentModes
+        return VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(modes.enumerated()), id: \.element.id) { index, mode in
                 ModeRow(
                     title: mode.title,
                     subtitle: index == 0 ? "driver default" : nil,
+                    isCurrent: display.configuredModeEntry?.id == mode.id,
                     isSelected: savedTarget == mode.id
                 ) { select(mode) }
+                if index < modes.count - 1 {
+                    Divider().padding(.leading, 28)
+                }
             }
         }
+        .padding(.vertical, 4)
+        .background(.quinary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var hint: some View {
+        Text("Pinning records the target and re-detects the display after link resets. YCbCr modes can be removed for good with the EDID override (see README).")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
     }
 
     private func select(_ mode: ColorModeEntry) {
@@ -185,6 +246,9 @@ private struct DisplaySection: View {
             if !Settings.isLocked(display.id) {
                 Settings.setLocked(display.id, true)
             }
+            // Give immediate feedback: re-run detection so the pinned target
+            // becomes the reference for the next mode selection.
+            guard_.reassertNow()
         }
     }
 }
@@ -192,24 +256,36 @@ private struct DisplaySection: View {
 private struct ModeRow: View {
     let title: String
     let subtitle: String?
+    let isCurrent: Bool
     let isSelected: Bool
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            HStack {
+            HStack(spacing: 8) {
                 Image(systemName: isSelected ? "smallcircle.fill.circle" : "circle")
-                    .font(.system(size: 11))
+                    .font(.footnote)
                     .foregroundStyle(isSelected ? Color.accentColor : .secondary)
                 Text(title)
-                    .font(.system(size: 11).monospaced())
+                    .font(.footnote.monospacedDigit())
+                    .lineLimit(1)
+                if isCurrent {
+                    Text("current")
+                        .font(.caption2.weight(.medium))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(Color.accentColor.opacity(0.18), in: Capsule())
+                        .foregroundStyle(.secondary)
+                }
                 if let subtitle {
                     Text(subtitle)
-                        .font(.system(size: 9))
+                        .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
                 Spacer()
             }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

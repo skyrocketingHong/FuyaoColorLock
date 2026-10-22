@@ -36,7 +36,7 @@ scripts/build-app.sh
 open build/FuyaoColorLock.app
 ```
 
-The menu-bar panel opens with one tab per external display. Each tab shows the active timing and the color modes the driver actually offers on it (top row = driver preference, nothing preselected), plus an independent lock toggle. Selecting a mode pins it and enables that display's lock; after display events the app re-detects displays to nudge mode selection back into bounds.
+The menu-bar panel opens with one tab per external display. Tabs animate their height smoothly when switching, the macOS-recorded current mode is shown per display (with a "current" badge on the matching row when available), and selecting a mode pins it, enables that display's lock, and immediately re-detects displays for feedback. Each tab shows the active timing and the color modes the driver actually offers on it (top row = driver preference, nothing preselected), plus an independent lock toggle. Selecting a mode pins it and enables that display's lock; after display events the app re-detects displays to nudge mode selection back into bounds.
 
 ### Locking out YCbCr for good
 
