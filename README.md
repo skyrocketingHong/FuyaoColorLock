@@ -39,7 +39,7 @@ scripts/build-app.sh
 open build/FuyaoColorLock.app
 ```
 
-The script uses the selected SDK through `xcrun` (validated with macOS 27.2 and Swift 6.4.2), packages an optimized arm64 app with localization resources and verifies its ad hoc signature before replacing the previous build. Native macOS 26 and 27 controls are used where available, with macOS 13 fallbacks. The app is not notarized. Build 3 retains marketing version 1.0.
+The script uses the selected SDK through `xcrun` (validated with macOS 27.2 and Swift 6.4.2), packages an optimized arm64 app with localization resources and verifies its ad hoc signature before replacing the previous build. Native macOS 26 and 27 controls are used where available, with macOS 13 fallbacks. The app is not notarized. Build 4 retains marketing version 1.0.
 
 ## Reading the panel
 
@@ -58,11 +58,11 @@ Choose **Apply** beside a compatible mode. A brief blank screen can occur during
 The panel is ordered **color mode switching and lock → installation configuration → app settings and About**. The lock switch is in the first section, alongside the live connection information and mode choices.
 
 1. Apply the desired compatible mode and check that system readback confirms it.
-2. Enable **Lock color mode**. **Locked target** shows the format and timing being retained. Each display has an independent lock, disabled by default; old numeric target preferences do not silently enable it.
+2. Enable **Lock color mode**. Expand **Locked target** to see the format and timing being retained. Each display has an independent lock, disabled by default; old numeric target preferences do not silently enable it.
 3. Keep the app running. After wake, reconnection or detected drift, it looks for a unique current native mode matching the saved parameters, restores it when compatible and verifies the result. Changing driver mode IDs after reconnection does not change the saved target.
 4. A confirmed manual mode change while locked updates the locked target. To stop automatic restoration, turn off the switch; this does not itself change the current mode. Use **Launch at Login** in **Application settings** if the app should resume monitoring after login.
 
-A different resolution, refresh rate, HDR or VRR state suspends restoration rather than forcing the old timing. Missing data, disconnected displays and sleeping screens remain waiting or unavailable. Failed restoration retries after 5 and 15 seconds, then pauses after three consecutive failures. Automatic setting requests are also limited to three per 60 seconds. Inspect the live mode before choosing **Retry mode lock**. An enabled switch means the preference is active, while the adjacent status explains whether the system mode actually matches.
+A different resolution, refresh rate, HDR or VRR state suspends restoration rather than forcing the old timing. Missing data, disconnected displays and sleeping screens remain waiting or unavailable. Failed restoration retries after 5 and 15 seconds, then pauses after three consecutive failures. Automatic setting requests are also limited to three per 60 seconds. Inspect the live mode before choosing **Retry** in the lock section. An enabled switch means the preference is active, while the adjacent status explains whether the system mode actually matches.
 
 ## Optional EDID override
 
@@ -91,9 +91,9 @@ The patch clears CTA YCbCr 4:4:4 and 4:2:2 flags and removes CTA YCbCr 4:2:0 vid
 ### Check the live mode after applying a format
 
 1. Select the correct display and note its **Live connection mode** before changing anything, so you can select the previous compatible mode again if needed.
-2. In **Connection mode options**, apply a listed RGB Full mode. For example, `8-bit · SDR · RGB Full · sRGB` reports 8-bit SDR with full-range RGB; `sRGB` alone does not establish the encoding or range. Resolution, refresh rate, HDR and VRR state should remain unchanged.
+2. In **Connection mode options**, apply a listed RGB Full mode. Check `RGB Full` on the format line and the bit depth, HDR and gamut below it, for example `8-bit · SDR · sRGB`. `sRGB` alone does not establish the encoding or range. Compatible rows share the timing shown in the live summary; resolution, refresh rate, HDR and VRR state should remain unchanged.
 3. Allow several seconds for **Latest mode change** to show **System read-back matched the requested mode after the change.** The app requires two complete matching reads 0.5 seconds apart, with a six-second verification window. **The selected mode has not been confirmed** is not a success result.
-4. Click **Refresh** or press **⌘R**. Check that **Last read** advances and **Live connection mode** still shows the requested format. If it shows `YCbCr` or `RGB Limited`, the current system mode does not meet the RGB Full target. If the live mode is unavailable, the result remains unverified.
+4. Click the **Refresh** arrow icon at the top right or press **⌘R**. Check that **Last read** advances and **Live connection mode** still shows the requested format. If it shows `YCbCr` or `RGB Limited`, the current system mode does not meet the RGB Full target. If the live mode is unavailable, the result remains unverified.
 5. To check whether the result survives renegotiation, repeat the read after sleep/wake or after reconnecting the HDMI cable. With the lock off, this checks what macOS retained. With the lock on, also check **Locked target** and the lock status: restoration must finish with the live mode matching the target. Merely staying in the same mode does not exercise the restoration path. Turn off the lock when you want to inspect negotiation without automatic correction.
 
 The driver mode list and **macOS record** are reference data, not the current-mode verdict. A **Current** label identifies the system-reported mode, not a physical signal measurement.

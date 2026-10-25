@@ -9,20 +9,19 @@ struct AppSettingsView: View {
     @State private var loginError: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: PanelMetrics.rowSpacing) {
             PanelSectionTitle(title: "Application settings")
-            InformationGroup("Startup") {
-                Toggle("Launch at Login", isOn: Binding(get: { launchAtLogin }, set: updateLoginItem))
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                if needsApproval {
-                    Button("Allow in Login Items…") {
-                        SMAppService.openSystemSettingsLoginItems()
-                    }
-                    .modifier(PanelActionStyle())
+            GroupBox {
+                VStack(alignment: .leading, spacing: PanelMetrics.rowSpacing) {
+                    LoginItemSettingsRow(
+                        isEnabled: Binding(get: { launchAtLogin }, set: updateLoginItem),
+                        needsApproval: needsApproval
+                    )
+                    Divider()
+                    AboutInformation(showAbout: showAbout)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            AboutInformation(showAbout: showAbout)
         }
         .onAppear(perform: refreshLoginStatus)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -50,18 +49,56 @@ struct AppSettingsView: View {
     }
 }
 
+private struct LoginItemSettingsRow: View {
+    @Binding var isEnabled: Bool
+    let needsApproval: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: PanelMetrics.rowSpacing) {
+            PanelControlRow {
+                Text("Launch at Login")
+                    .fixedSize(horizontal: false, vertical: true)
+            } control: {
+                Toggle("Launch at Login", isOn: $isEnabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.regular)
+                    .accessibilityLabel("Launch at Login")
+            }
+            if needsApproval {
+                HStack {
+                    Spacer(minLength: 0)
+                    Button {
+                        SMAppService.openSystemSettingsLoginItems()
+                    } label: {
+                        PanelActionLabel("Allow in Login Items…")
+                    }
+                    .modifier(PanelActionStyle())
+                }
+            }
+        }
+    }
+}
+
 private struct AboutInformation: View {
     let showAbout: () -> Void
 
     var body: some View {
-        InformationGroup("About") {
-            LabeledContent("Version") {
+        PanelControlRow {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text("Version")
                 Text(version)
-                    .font(.body.monospacedDigit())
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
-            Button("About Fuyao Color Lock…", action: showAbout)
-                .modifier(PanelActionStyle())
+            .fixedSize(horizontal: false, vertical: true)
+        } control: {
+            Button(action: showAbout) {
+                PanelActionLabel("About…")
+            }
+            .modifier(PanelActionStyle())
+            .accessibilityLabel("About Fuyao Color Lock…")
         }
     }
 

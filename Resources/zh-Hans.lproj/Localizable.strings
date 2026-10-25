@@ -133,3 +133,15 @@
 "The locked mode was not confirmed. Another attempt is scheduled." = "锁定模式尚未确认，将稍后再次尝试。";
 "Automatic attempts are paused. Check the connection, then retry or turn off the lock." = "自动尝试已暂停。请检查连接后重试，或关闭锁定。";
 "The display is sleeping. Restoration resumes after wake." = "显示器正在睡眠，唤醒后再恢复锁定。";
+"About…" = "关于…";
+"Full Range is not guaranteed. Installing or restoring requires administrator approval." = "不能保证 Full Range。安装和恢复需要管理员授权。";
+"CTA flag groups" = "CTA 标志组";
+"4:2:0 blocks" = "4:2:0 数据块";
+"Override details" = "配置说明";
+"Removes CTA-advertised YCbCr support. Reconnect the display after installation or restoration." = "移除 CTA 声明的 YCbCr 支持。安装或恢复后，请重新连接显示器。";
+"Reconnect the display to load this configuration." = "重新连接显示器以加载此配置。";
+"Ready to export or install." = "可导出或安装。";
+"The display may briefly go blank when applying a mode." = "应用模式时，显示器可能短暂黑屏。";
+"Other modes (view only)" = "其他模式（仅查看）";
+"Keep this mode after wake or reconnection." = "唤醒或重新连接后保持此模式。";
+"Retry" = "重试";

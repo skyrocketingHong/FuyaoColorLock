@@ -7,42 +7,61 @@ struct ModeLockView: View {
     let retry: () -> Void
 
     var body: some View {
-        InformationGroup("Mode lock") {
-            Toggle("Lock color mode", isOn: Binding(
-                get: { state.isEnabled },
-                set: setEnabled
-            ))
-            .toggleStyle(.switch)
-            .controlSize(.small)
-            .disabled(!state.isEnabled && (!state.canEnable || isBusy))
+        VStack(alignment: .leading, spacing: PanelMetrics.rowSpacing) {
+            PanelControlRow {
+                Text("Lock color mode")
+                    .font(.body)
+                    .fixedSize(horizontal: false, vertical: true)
+            } control: {
+                Toggle("Lock color mode", isOn: Binding(
+                    get: { state.isEnabled },
+                    set: setEnabled
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.regular)
+                .disabled(!state.isEnabled && (!state.canEnable || isBusy))
+            }
 
-            Text(statusMessage)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .top, spacing: PanelMetrics.rowSpacing) {
+                if state.phase == .restoring {
+                    ProgressView().controlSize(.small)
+                }
+                Text(statusMessage)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .help("Keep the current mode after wake or reconnection. Confirmed manual changes update the locked target.")
 
             if state.isEnabled, let target = state.target {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Locked target")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(target.title)
-                        .font(.callout.monospaced())
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(target.timingLabel)
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                DisclosureGroup("Locked target") {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(target.title)
+                            .font(.callout.monospaced())
+                        Text(target.timingLabel)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 4)
                 }
+                .font(.callout)
             }
 
-            if state.phase == .restoring {
-                ProgressView().controlSize(.small)
-            }
             if state.phase == .paused || state.phase == .retryScheduled {
-                Button("Retry mode lock", action: retry)
+                HStack {
+                    Spacer(minLength: 0)
+                    Button(action: retry) {
+                        PanelActionLabel("Retry")
+                    }
                     .modifier(PanelActionStyle())
                     .disabled(isBusy)
+                    .help("Retry mode lock")
+                    .accessibilityLabel("Retry mode lock")
+                }
             }
         }
     }
@@ -51,7 +70,7 @@ struct ModeLockView: View {
         switch state.phase {
         case .off:
             return state.canEnable
-                ? "Keep the current mode after wake or reconnection. Confirmed manual changes update the locked target."
+                ? "Keep this mode after wake or reconnection."
                 : "A readable, supported native mode is required before locking."
         case .matching:
             return "Lock enabled. The system mode matches the saved target."

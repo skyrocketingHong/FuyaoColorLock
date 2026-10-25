@@ -133,3 +133,15 @@
 "The locked mode was not confirmed. Another attempt is scheduled." = "The locked mode was not confirmed. Another attempt is scheduled.";
 "Automatic attempts are paused. Check the connection, then retry or turn off the lock." = "Automatic attempts are paused. Check the connection, then retry or turn off the lock.";
 "The display is sleeping. Restoration resumes after wake." = "The display is sleeping. Restoration resumes after wake.";
+"About…" = "About…";
+"Full Range is not guaranteed. Installing or restoring requires administrator approval." = "Full Range is not guaranteed. Installing or restoring requires administrator approval.";
+"CTA flag groups" = "CTA flag groups";
+"4:2:0 blocks" = "4:2:0 blocks";
+"Override details" = "Override details";
+"Removes CTA-advertised YCbCr support. Reconnect the display after installation or restoration." = "Removes CTA-advertised YCbCr support. Reconnect the display after installation or restoration.";
+"Reconnect the display to load this configuration." = "Reconnect the display to load this configuration.";
+"Ready to export or install." = "Ready to export or install.";
+"The display may briefly go blank when applying a mode." = "The display may briefly go blank when applying a mode.";
+"Other modes (view only)" = "Other modes (view only)";
+"Keep this mode after wake or reconnection." = "Keep this mode after wake or reconnection.";
+"Retry" = "Retry";

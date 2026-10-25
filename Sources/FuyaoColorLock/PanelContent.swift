@@ -12,19 +12,18 @@ struct PanelContent: View {
             PanelHeader(isApplying: monitor.isApplying, refresh: monitor.reload)
 
             if !monitor.displays.isEmpty {
-                Picker("Display", selection: selection) {
-                    ForEach(monitor.displays) { display in
-                        Text(display.name).tag(display.id)
-                    }
-                }
-                .pickerStyle(.menu)
-                .padding(.horizontal, 16)
+                DisplaySelectionRow(
+                    choices: monitor.displays.map { DisplayMenuPicker.Choice(id: $0.id, name: $0.name) },
+                    selection: selection,
+                    selectedName: selectedDisplay?.name ?? ""
+                )
+                .padding(.horizontal, PanelMetrics.contentInset)
                 .padding(.bottom, 12)
             }
 
             ScrollViewReader { proxy in
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
+                    VStack(alignment: .leading, spacing: PanelMetrics.sectionSpacing) {
                         Color.clear.frame(height: 0).id("display-content-start")
 
                         if monitor.refreshFailed {
@@ -47,8 +46,8 @@ struct PanelContent: View {
 
                         AppSettingsView(showAbout: showAbout)
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 16)
+                    .padding(.horizontal, PanelMetrics.contentInset)
+                    .padding(.bottom, PanelMetrics.contentInset)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .modifier(PanelScrollEdges())
@@ -94,13 +93,36 @@ private struct PanelHeader: View {
             Spacer(minLength: 0)
             Button(action: refresh) {
                 Label("Refresh", systemImage: "arrow.clockwise")
+                    .labelStyle(.iconOnly)
+                    .frame(minWidth: 16, minHeight: 16)
             }
             .modifier(PanelActionStyle())
             .keyboardShortcut("r")
             .disabled(isApplying)
             .help("Refresh display information and check enabled mode locks. ⌘R")
         }
-        .padding(16)
+        .padding(.horizontal, PanelMetrics.contentInset)
+        .padding(.vertical, 12)
+    }
+}
+
+private struct DisplaySelectionRow: View {
+    let choices: [DisplayMenuPicker.Choice]
+    @Binding var selection: String
+    let selectedName: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            DisplayMenuPicker(choices: choices, selection: $selection)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: PanelMetrics.controlMinHeight)
+            Text(selectedName)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 
@@ -125,19 +147,16 @@ private struct ColorModeSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             PanelSectionTitle(title: "Color modes")
-            Text(display.name)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-
-            LiveModeInformation(connection: display.liveConnection, applyResult: monitor.applyResults[display.id])
-            ModeLockView(
-                state: monitor.lockState(for: display),
-                isBusy: monitor.isApplying || overrides.isBusy,
-                setEnabled: { monitor.setModeLock($0, for: display) },
-                retry: { monitor.retryModeLock(for: display) }
-            )
+            InformationGroup("Live connection mode") {
+                LiveModeInformation(connection: display.liveConnection, applyResult: monitor.applyResults[display.id])
+                Divider()
+                ModeLockView(
+                    state: monitor.lockState(for: display),
+                    isBusy: monitor.isApplying || overrides.isBusy,
+                    setEnabled: { monitor.setModeLock($0, for: display) },
+                    retry: { monitor.retryModeLock(for: display) }
+                )
+            }
 
             if let live = display.liveConnection {
                 NativeModeInformation(connection: live, isBusy: monitor.isApplying || overrides.isBusy) { mode in
@@ -173,12 +192,12 @@ private struct PanelFooter: View {
                 .foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
-            Button("Quit") { NSApp.terminate(nil) }
+            Button { NSApp.terminate(nil) } label: { PanelActionLabel("Quit", minimumWidth: 44) }
                 .modifier(PanelActionStyle())
                 .keyboardShortcut("q")
                 .disabled(isBusy)
         }
-        .padding(.horizontal, 16)
+        .padding(.horizontal, PanelMetrics.contentInset)
         .padding(.vertical, 12)
     }
 }

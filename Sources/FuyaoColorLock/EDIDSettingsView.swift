@@ -8,11 +8,6 @@ struct EDIDSettingsView: View {
 
     var body: some View {
         InformationGroup("Prefer RGB with EDID override") {
-            Text("Remove advertised YCbCr support to favor RGB. Full Range is not guaranteed; reconnect the display and verify its output after installation.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
             if let status {
                 EDIDInstallationStatus(status: status)
 
@@ -21,29 +16,25 @@ struct EDIDSettingsView: View {
                 }
 
                 ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 8) {
+                    HStack(spacing: PanelMetrics.rowSpacing) {
                         EDIDActionButtons(display: display, manager: manager, status: status)
                     }
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(spacing: PanelMetrics.rowSpacing) {
                         EDIDActionButtons(display: display, manager: manager, status: status)
                     }
                 }
                 .disabled(manager.isBusy)
-
-                if let path = status.destinationPath {
-                    DisclosureGroup("File location") {
-                        Text(path)
-                            .font(.caption.monospaced())
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .font(.caption)
-                }
             }
 
+            Text("Full Range is not guaranteed. Installing or restoring requires administrator approval.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            EDIDDetails(path: status?.destinationPath)
+
             if manager.isBusy {
-                HStack(spacing: 8) {
+                HStack(spacing: PanelMetrics.rowSpacing) {
                     ProgressView().controlSize(.small)
                     Text("Working on the override…")
                         .font(.caption)
@@ -78,21 +69,62 @@ private struct EDIDChangePreview: View {
     let patch: EDIDPatch
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("CTA flag groups to clear")
-                Spacer(minLength: 8)
-                Text(patch.clearedCTAFlags, format: .number).monospacedDigit()
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 16) {
+                EDIDChangeCount(title: "CTA flag groups", count: patch.clearedCTAFlags)
+                EDIDChangeCount(title: "4:2:0 blocks", count: patch.removed420Blocks)
             }
-            HStack(alignment: .firstTextBaseline) {
-                Text("YCbCr 4:2:0 blocks to remove")
-                Spacer(minLength: 8)
-                Text(patch.removed420Blocks, format: .number).monospacedDigit()
+            VStack(alignment: .leading, spacing: 4) {
+                EDIDChangeCount(title: "CTA flag groups", count: patch.clearedCTAFlags)
+                EDIDChangeCount(title: "4:2:0 blocks", count: patch.removed420Blocks)
             }
         }
         .font(.caption)
         .foregroundStyle(.secondary)
-        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct EDIDChangeCount: View {
+    let title: LocalizedStringKey
+    let count: Int
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(title)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(count, format: .number)
+                .monospacedDigit()
+                .foregroundStyle(.primary)
+        }
+    }
+}
+
+private struct EDIDDetails: View {
+    let path: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: PanelMetrics.rowSpacing) {
+            DisclosureGroup("Override details") {
+                Text("Removes CTA-advertised YCbCr support. Reconnect the display after installation or restoration.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 4)
+            }
+            if let path {
+                DisclosureGroup("File location") {
+                    Text(path)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 4)
+                }
+            }
+        }
+        .font(.caption)
     }
 }
 
@@ -100,7 +132,7 @@ private struct EDIDInstallationStatus: View {
     let status: EDIDOverrideStatus
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
             if status.hasConflictingInstall {
                 Label("An existing override needs review", systemImage: "exclamationmark.triangle")
                     .font(.callout)
@@ -110,7 +142,7 @@ private struct EDIDInstallationStatus: View {
             } else if status.installed {
                 Label("Override file installed", systemImage: "doc.badge.gearshape")
                     .font(.callout.weight(.medium))
-                Text("Reconnect to load it. Installation does not verify RGB or Full Range output.")
+                Text("Reconnect the display to load this configuration.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else if status.canRestore {
@@ -126,9 +158,8 @@ private struct EDIDInstallationStatus: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
-                Text("Ready to export or install. Installation requires administrator approval.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Text("Ready to export or install.")
+                    .font(.callout)
             }
         }
         .fixedSize(horizontal: false, vertical: true)
@@ -141,17 +172,34 @@ private struct EDIDActionButtons: View {
     let status: EDIDOverrideStatus
 
     var body: some View {
-        Button("Export…") { manager.exportOverride(for: display) }
-            .modifier(PanelActionStyle())
+        Group {
+            Button {
+                manager.exportOverride(for: display)
+            } label: {
+                PanelActionLabel("Export…")
+                    .frame(maxWidth: .infinity)
+            }
             .disabled(status.patch?.hasChanges != true)
             .help("Save the override file without installing it.")
-        Button("Install…") { manager.install(for: display) }
-            .modifier(PanelActionStyle())
+
+            Button {
+                manager.install(for: display)
+            } label: {
+                PanelActionLabel("Install…")
+                    .frame(maxWidth: .infinity)
+            }
             .disabled(status.patch?.hasChanges != true || status.installed || status.canRestore || status.hasConflictingInstall)
             .help("Install an RGB preference override with administrator approval.")
-        Button("Restore…") { manager.restore(for: display) }
-            .modifier(PanelActionStyle())
+
+            Button {
+                manager.restore(for: display)
+            } label: {
+                PanelActionLabel("Restore…")
+                    .frame(maxWidth: .infinity)
+            }
             .disabled(!status.canRestore)
             .help("Restore the original override backed up by this app.")
+        }
+        .modifier(PanelActionStyle())
     }
 }

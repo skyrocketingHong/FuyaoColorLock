@@ -5,23 +5,14 @@ struct LiveModeInformation: View {
     let applyResult: ModeApplyResult?
 
     var body: some View {
-        InformationGroup("Live connection mode") {
+        VStack(alignment: .leading, spacing: PanelMetrics.rowSpacing) {
             if let connection {
-                Text(connection.currentMode.title)
-                    .font(.body.monospaced())
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(connection.currentMode.timingLabel)
-                    .font(.callout.monospacedDigit())
-                    .textSelection(.enabled)
-                    .foregroundStyle(.secondary)
-                Text("Read from the active system display connection.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                NativeModeDescription(mode: connection.currentMode, showsTiming: true, isCurrent: true)
+                    .help("Read from the active system display connection.")
             } else {
                 Label("Live mode is unavailable", systemImage: "questionmark.circle")
                 Text("The system did not expose a readable live connection mode. Driver tables below remain available for reference.")
-                    .font(.caption)
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -30,6 +21,7 @@ struct LiveModeInformation: View {
                 ModeApplicationResult(result: applyResult)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -37,11 +29,11 @@ private struct ModeApplicationResult: View {
     let result: ModeApplyResult
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 4) {
             Text("Latest mode change")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            HStack(alignment: .top, spacing: 8) {
+            HStack(alignment: .top, spacing: PanelMetrics.rowSpacing) {
                 if result == .applying {
                     ProgressView().controlSize(.small)
                 } else {
@@ -82,7 +74,7 @@ struct NativeModeInformation: View {
         let other = connection.otherModes
         return InformationGroup("Connection mode options") {
             if connection.isWritable {
-                Text("Apply a format compatible with the current timing. The display may briefly go blank while the connection changes.")
+                Text("The display may briefly go blank when applying a mode.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -104,6 +96,7 @@ struct NativeModeInformation: View {
                 ForEach(compatible) { mode in
                     NativeModeRow(
                         mode: mode,
+                        showsTiming: false,
                         isCurrent: mode == connection.currentMode,
                         canApply: connection.isWritable && mode.id != connection.currentMode.id,
                         isBusy: isBusy,
@@ -114,27 +107,80 @@ struct NativeModeInformation: View {
             }
 
             if !other.isEmpty {
-                DisclosureGroup("Other timings (view only)") {
+                DisclosureGroup("Other modes (view only)") {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(other) { mode in
                             NativeModeRow(
                                 mode: mode,
+                                showsTiming: true,
                                 isCurrent: mode == connection.currentMode,
                                 canApply: false,
                                 isBusy: isBusy,
                                 applyMode: applyMode
                             )
+                            if mode.id != other.last?.id { Divider() }
                         }
                     }
                 }
-                .font(.caption)
+                .font(.callout)
             }
         }
     }
-
 }
 
 private struct NativeModeRow: View {
+    let mode: NativeConnectionMode
+    let showsTiming: Bool
+    let isCurrent: Bool
+    let canApply: Bool
+    let isBusy: Bool
+    let applyMode: (NativeConnectionMode) async -> Void
+
+    var body: some View {
+        PanelControlRow(minimumLabelWidth: 180) {
+            NativeModeDescription(mode: mode, showsTiming: showsTiming, isCurrent: isCurrent)
+                .foregroundStyle(canApply || isCurrent ? .primary : .secondary)
+        } control: {
+            NativeModeAction(mode: mode, isCurrent: isCurrent, canApply: canApply,
+                             isBusy: isBusy, applyMode: applyMode)
+        }
+        .padding(.vertical, 6)
+        .frame(minHeight: PanelMetrics.modeRowMinHeight)
+    }
+}
+
+private struct NativeModeDescription: View {
+    let mode: NativeConnectionMode
+    let showsTiming: Bool
+    let isCurrent: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(mode.formatLabel)
+                .font(.callout.monospaced().weight(isCurrent ? .semibold : .regular))
+                .fixedSize(horizontal: false, vertical: true)
+            Text(parameters)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if showsTiming {
+                Text(mode.timingLabel)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .textSelection(.enabled)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var parameters: String {
+        let gamut = mode.colorGamut == "gamut_SRGB" ? "sRGB" : mode.colorGamut
+        return "\(mode.bitDepth)-bit · \(mode.hdrMode) · \(gamut)"
+    }
+}
+
+private struct NativeModeAction: View {
     let mode: NativeConnectionMode
     let isCurrent: Bool
     let canApply: Bool
@@ -142,27 +188,17 @@ private struct NativeModeRow: View {
     let applyMode: (NativeConnectionMode) async -> Void
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(mode.title)
-                    .font(.callout.monospaced())
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-                Text(mode.timingLabel)
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .foregroundStyle(canApply || isCurrent ? .primary : .secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-
+        Group {
             if isCurrent {
                 Text("Current")
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } else if canApply {
-                Button("Apply") {
+                Button {
                     Task { await applyMode(mode) }
+                } label: {
+                    PanelActionLabel("Apply")
                 }
                 .modifier(PanelActionStyle())
                 .disabled(isBusy)
@@ -171,8 +207,9 @@ private struct NativeModeRow: View {
                 Text("View only")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(.vertical, 10)
+        .frame(minWidth: PanelMetrics.actionColumnMinWidth, alignment: .trailing)
     }
 }

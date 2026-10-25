@@ -2,10 +2,13 @@
 
 [简体中文](VALIDATION_ZH.md)
 
-Build target: Apple Silicon, macOS 13.0+, version 1.0 (3), built with macOS SDK 27.2 and Swift 6.4.2.
+Build target: Apple Silicon, macOS 13.0+, version 1.0 (4), built with macOS SDK 27.2 and Swift 6.4.2.
 
 ## Completed checks
 
+The build 4 changes concern presentation only. Existing display, lock and EDID regression results below are retained; unchanged business suites were not repeated for this layout pass.
+
+- UI source review checked action-column alignment, native button label sizing, long-text wrapping, narrow-width fallbacks and preservation of disabled states. An in-memory AppKit check confirmed that two identically named displays retain separate IDs and can be selected independently. No window or menu was shown for that check.
 - 8 display-model regression groups: missing timing, incomplete and conflicting records, mode identity, legacy preferences and unique EDID matching.
 - 5 native connection-mode groups: full-width IDs, exact timing compatibility, fresh identity and target checks, repeated readback and mutation exclusion.
 - 14 fake-backend mode-lock groups: default opt-out and persistence, drift and readback, fresh IDs after reconnection, incompatible or ambiguous modes, disabling during readback, manual target changes, failure and rate limits, sleep, reused display IDs, shared-gate contention and multiple displays. These tests use isolated preferences and never call the native setter.
@@ -24,17 +27,18 @@ Build target: Apple Silicon, macOS 13.0+, version 1.0 (3), built with macOS SDK 
 - The UI follows the EC25 native panel reference: fixed canvas, internal scrolling, system groups and controls, selectable technical values. No screenshot or appearance acceptance is claimed.
 - Supported actions have wired handlers; unsupported modes have no application action. Loading, unavailable, conflicting and unconfirmed states are explicit.
 - Panel order is color mode switching and lock, installation configuration, then application settings and About. Newer systems use native glass controls and scroll-edge effects; macOS 27 uses item-based alerts. About opens the standard system panel. Older supported systems retain fallback controls.
+- Current mode and lock share one group. Compatible mode rows display format and parameters without repeating their common timing. Controls use a shared regular size and action column; installation buttons share their available width, and application settings use one group. Full display names remain selectable below the native selector.
 
 ## Manual acceptance
 
 1. Open the built app and switch displays with different mode counts. The panel frame should stay fixed, with content scrolling inside it.
-2. Reopen from menu bars on screens with different scaling and positions. Check small-screen clamping, long names, both languages, appearance and keyboard navigation.
+2. Reopen from menu bars on screens with different scaling and positions. Check small-screen clamping, long names, duplicate display names, both languages, appearance and keyboard navigation. In a narrow panel, verify that controls move below their labels and EDID buttons form a vertical group without clipping.
 3. Confirm unsupported modes remain readable and cannot be applied. Apply a compatible native mode, check the pending state and compare the resulting live format with the request. Confirmation requires two matching reads; timeout must not report success. Saved WindowServer records must not appear as live measurements.
 4. Enable **Lock color mode** only after choosing the intended current mode. After wake or reconnection, compare the saved target, lock status and live mode. Disable the switch to stop future restorations. Confirm that incompatible timing changes remain waiting and that a failed manual mode change does not immediately restore the old target.
 5. Export an EDID override first. Check the displayed change summary and file path. Installation or restoration requires explicit confirmation and macOS administrator authorization. Turn the mode lock off when checking the effect of the EDID override alone.
 6. After installation or restoration, reconnect the display and inspect actual output. File installation is not evidence of RGB Full Range output. Check the application settings and standard About panel at the end of the popover.
 
-The previous running app was gracefully restarted into version 1.0 (3), and launch completion was confirmed with mode locks disabled. No BetterDisplay application, administrator installer or live mode-setting operation was invoked by these checks. No display EEPROM was written. Visual, keyboard, real lock restoration, administrator and HDMI signal acceptance remain pending.
+The previous running app was gracefully restarted into version 1.0 (4), and launch completion was confirmed. Existing mode-lock preferences were not edited. No BetterDisplay application, administrator installer or manual display mode change was invoked by the UI checks; previously enabled automatic locking retains its existing behavior. No display EEPROM was written. Visual, keyboard, real lock restoration, administrator and HDMI signal acceptance remain pending.
 
 ## Reproduce checks
 

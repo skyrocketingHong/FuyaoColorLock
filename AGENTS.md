@@ -46,6 +46,7 @@
 - 参考 EC25 Toolbox 的原生呈现：`NSStatusItem + NSPopover`，固定 480×660 pt 逻辑画布，每次展示前按锚点屏幕 `visibleFrame` 减去 24 pt 安全钳制。
 - 关闭 hosting 的 intrinsic 尺寸回写，每次展示同步 content size、preferred size、frame 和零原点 bounds；页面内部滚动，切换显示器或模式数量不改变外框，不对整个面板应用尺寸动画。
 - 保持原生控件、系统外观、纯文本分组标题、中性操作按钮；技术值等宽且可选择，长名称和状态自然换行。新增文案同步 `Resources/en.lproj` 和 `Resources/zh-Hans.lproj`。
+- 原生显示器选择器按稳定 ID 管理选项；`NSPopUpButton.addItem(withTitle:)` 会移除同名项，需直接添加 `NSMenuItem`，保留同型号显示器的独立身份。仅在选项实际变化时重建菜单，避免轮询刷新扰动选择。
 - UI 和真实显示器切换的视觉验收由用户完成，默认不启动应用、截图或更改实际显示设置。
 
 ## 构建和验证
@@ -59,5 +60,5 @@
 
 ## 版本和发布
 
-- 营销版本保持两段，当前 1.0；`CFBundleVersion` 单调递增，当前 3。
+- 营销版本保持两段，当前 1.0；`CFBundleVersion` 单调递增，当前 4。
 - 每个已验证阶段建立范围明确的英文 Conventional Commit；默认不 push、不发布 Release，不提交 build、反编二进制、日志或真实设备数据。
