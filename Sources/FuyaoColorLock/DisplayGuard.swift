@@ -2,70 +2,149 @@ import AppKit
 import CoreGraphics
 import Foundation
 
-/// Watches display events and keeps the per-display lock state fresh.
-///
-/// The lock works in two layers:
-/// 1. The EDID override (installed separately) removes unwanted connection
-///    color modes from the driver's table, so macOS cannot pick them at all.
-/// 2. When a locked display goes through a reconfiguration, wake, or manual
-///    mode change, the guard triggers a display re-detection and a link
-///    re-program (same-resolution timing flip when possible), which makes
-///    macOS re-run mode selection under the override's constraints.
+enum ModeApplyResult: Equatable {
+    case applying
+    case confirmed
+    case unconfirmed
+    case unavailable
+    case failed
+}
+
+/// Refreshes driver tables and recorded configuration without reprogramming a link.
 @MainActor
 final class DisplayGuard: ObservableObject {
     @Published private(set) var displays: [PhysicalDisplay] = []
+    @Published private(set) var preferences: [String: DisplayPreference] = [:]
+    @Published private(set) var lastRefreshAt: Date?
+    @Published private(set) var refreshFailed = false
     @Published private(set) var lastAction: String?
-    @Published private(set) var lastActionAt: Date?
+    @Published private(set) var isApplying = false
+    @Published private(set) var applyResults: [String: ModeApplyResult] = [:]
 
-    private var debounceWorkItem: DispatchWorkItem?
-    private let debounceInterval: TimeInterval = 3.0
+    private var refreshTask: Task<Void, Never>?
     private var pollTimer: Timer?
+    private var observers: [(NotificationCenter, NSObjectProtocol)] = []
+    private var confirmedModes: [String: NativeConnectionMode] = [:]
 
     init() {
         _ = PrivateSLS.ensureConnection()
         reload()
-        registerDisplayCallback()
-        observeWorkspaceNotifications()
-        scheduleReassert(delay: 1.0)
+        observeDisplayNotifications()
         startPolling()
     }
 
-    // MARK: - Catalog
-
     func reload() {
-        let snapshot = DisplayCatalog.snapshot()
-        // IORegistry timing tables change after link events; a plain diff
-        // against published state keeps object identity where possible.
-        displays = snapshot
-    }
-
-    // MARK: - Event sources
-
-    private func registerDisplayCallback() {
-        let context = Unmanaged.passUnretained(self).toOpaque()
-        let callback: CGDisplayReconfigurationCallBack = { _, flags, userInfo in
-            guard let userInfo else { return }
-            let guardObject = Unmanaged<DisplayGuard>.fromOpaque(userInfo).takeUnretainedValue()
-            let interesting: CGDisplayChangeSummaryFlags = [
-                .addFlag, .removeFlag, .enabledFlag, .disabledFlag, .setModeFlag,
-            ]
-            guard !flags.intersection(interesting).isEmpty else { return }
-            Task { @MainActor in
-                guardObject.scheduleReassert()
-            }
-        }
-        CGDisplayRegisterReconfigurationCallback(callback, context)
-    }
-
-    private func observeWorkspaceNotifications() {
-        let center = NSWorkspace.shared.notificationCenter
-        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
-            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in
-                    self?.scheduleReassert(delay: 4.0)
+        switch DisplayCatalog.snapshotResult() {
+        case .success(let snapshot):
+            if displays != snapshot { displays = snapshot }
+            let currentPreferences = Dictionary(uniqueKeysWithValues: snapshot.map {
+                ($0.id, Settings.preference(for: $0))
+            })
+            if preferences != currentPreferences { preferences = currentPreferences }
+            for (identity, mode) in confirmedModes {
+                if snapshot.first(where: { $0.id == identity })?.liveConnection?.currentMode != mode {
+                    applyResults[identity] = .unconfirmed
+                    confirmedModes.removeValue(forKey: identity)
                 }
             }
+            refreshFailed = false
+            lastRefreshAt = Date()
+        case .failure:
+            // Do not present a retained successful snapshot as a fresh reading.
+            displays = []
+            preferences = [:]
+            refreshFailed = true
+            for identity in confirmedModes.keys { applyResults[identity] = .unconfirmed }
+            confirmedModes.removeAll()
         }
+    }
+
+    func preference(for display: PhysicalDisplay) -> DisplayPreference {
+        preferences[display.id] ?? DisplayPreference()
+    }
+
+    func clearTarget(for display: PhysicalDisplay) {
+        Settings.clearTarget(for: display)
+        preferences[display.id] = DisplayPreference()
+        lastAction = String(localized: "Historical target cleared. Display settings are unchanged.")
+    }
+
+    func apply(_ mode: NativeConnectionMode, to display: PhysicalDisplay) async {
+        guard !isApplying else { return }
+        guard let live = display.liveConnection, live.isWritable, DisplayMutationGate.begin() else {
+            applyResults[display.id] = .unavailable
+            return
+        }
+        isApplying = true
+        applyResults[display.id] = .applying
+        confirmedModes.removeValue(forKey: display.id)
+        defer {
+            isApplying = false
+            DisplayMutationGate.end()
+        }
+
+        guard let fresh = try? DisplayCatalog.snapshotResult().get().first(where: {
+            $0.id == display.id && $0.cgDirectDisplayID == display.cgDirectDisplayID
+        }), fresh.liveConnection?.isWritable == true,
+              fresh.liveConnection?.currentMode == live.currentMode else {
+            applyResults[display.id] = .unavailable
+            reload()
+            return
+        }
+
+        switch CoreDisplayModes.requestApply(mode, to: display.cgDirectDisplayID, expectedCurrent: live.currentMode,
+                                             expectedDisplayIdentity: display.id) {
+        case .unavailable:
+            applyResults[display.id] = .unavailable
+            reload()
+            return
+        case .alreadyCurrent:
+            confirmedModes[display.id] = mode
+            applyResults[display.id] = .confirmed
+            reload()
+            return
+        case .requested:
+            break
+        }
+
+        var verifier = ModeReadbackVerifier(expected: mode)
+        for _ in 0..<12 {
+            do {
+                try await Task.sleep(nanoseconds: 500_000_000)
+            } catch {
+                applyResults[display.id] = .unconfirmed
+                reload()
+                return
+            }
+            guard DisplayCatalog.stableIdentity(for: display.cgDirectDisplayID) == display.id else {
+                applyResults[display.id] = .unconfirmed
+                reload()
+                return
+            }
+            let actual = CoreDisplayModes.snapshot(for: display.cgDirectDisplayID)?.currentMode
+            if verifier.observe(actual) {
+                confirmedModes[display.id] = mode
+                applyResults[display.id] = .confirmed
+                reload()
+                return
+            }
+        }
+        reload()
+        applyResults[display.id] = .unconfirmed
+    }
+
+    private func observeDisplayNotifications() {
+        observe(NSApplication.didChangeScreenParametersNotification, on: .default, delay: 0.5)
+        for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
+            observe(name, on: NSWorkspace.shared.notificationCenter, delay: 4.0)
+        }
+    }
+
+    private func observe(_ name: Notification.Name, on center: NotificationCenter, delay: TimeInterval) {
+        let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.scheduleRefresh(delay: delay) }
+        }
+        observers.append((center, token))
     }
 
     private func startPolling() {
@@ -79,46 +158,20 @@ final class DisplayGuard: ObservableObject {
         pollTimer = timer
     }
 
-    // MARK: - Reassert
-
-    func scheduleReassert(delay: TimeInterval? = nil) {
-        debounceWorkItem?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            Task { @MainActor in
-                self?.reassert()
-            }
+    private func scheduleRefresh(delay: TimeInterval) {
+        refreshTask?.cancel()
+        refreshTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            } catch { return }
+            guard !Task.isCancelled else { return }
+            self?.reload()
         }
-        debounceWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + (delay ?? debounceInterval), execute: work)
     }
 
-    func reassert() {
-        guard Settings.anyLockEnabled else {
-            reload()
-            return
-        }
-        var actions: [String] = []
-        if PrivateSLS.detectDisplays() {
-            actions.append("re-detected displays")
-        }
-        // Re-apply the current CGS mode on locked displays: an identical-mode
-        // apply is a no-op for the desktop but the transaction still runs the
-        // display pipeline update path on most systems; if it is rejected we
-        // simply rely on the detection above.
-        reload()
-        let names = displays
-            .filter { Settings.isLocked($0.id) }
-            .map(\.name)
-        if !names.isEmpty {
-            actions.append("lock active on \(names.joined(separator: ", "))")
-        }
-        lastAction = actions.joined(separator: "; ")
-        lastActionAt = Date()
-    }
-
-    /// Manual button.
-    func reassertNow() {
-        debounceWorkItem?.cancel()
-        reassert()
+    deinit {
+        refreshTask?.cancel()
+        pollTimer?.invalidate()
+        for (center, token) in observers { center.removeObserver(token) }
     }
 }

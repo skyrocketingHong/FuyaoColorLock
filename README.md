@@ -5,7 +5,7 @@
 <h1 align="center">Fuyao Color Lock</h1>
 
 <p align="center">
-  A zero-dependency macOS menu-bar utility that shows each external display's real connection color modes and locks them in place with an optional EDID override
+  A native macOS menu-bar utility for inspecting and applying external display connection formats.
 </p>
 
 <p align="center">
@@ -15,55 +15,83 @@
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license">
 </p>
 
-macOS keeps resetting external displays from the pixel format you picked (for example 8-bit SDR RGB Full Range) back to YCbCr or 10-bit variants after waking from sleep or a link renegotiation. BetterDisplay can switch the mode, but keeping it locked is a Pro feature, and its switching path is closed-source.
+Fuyao Color Lock reads live system connection modes and can request a supported format change through the native display API. The panel separates live mode information, driver-advertised capabilities and older macOS configuration records.
 
-Fuyao Color Lock takes a fully independent approach:
+**Only native modes compatible with the current resolution, refresh rate, HDR state and VRR state can be applied.** Other modes remain view-only. A successful action requires repeated system readback matching the requested mode; it is not an independent measurement of HDMI output or panel gamut. The app does not change ICC profiles or automatically reapply a mode after waking.
 
-- **Read side**: the driver publishes every display's timing table (`TimingElements → ColorModes`, with bit depth, RGB/YCbCr chroma, range, EOTF) in IORegistry. The app reads it directly and shows, per display tab, exactly the modes that display actually supports — no hardcoded list.
-- **Lock side**: the companion `patch-edid.py` script generates a one-time EDID override that strips YCbCr capability from the display. Once installed, macOS cannot pick YCbCr modes at all, on any reset, with no background process required. The app watches display events and re-detects displays (`SLSDetectDisplays`) after each reconnect or wake while a lock is enabled.
+## Features
 
-## Requirements
+- A native popover with a fixed canvas and internal scrolling. Switching displays does not resize the panel to fit a different number of modes.
+- Separate display timing, macOS records and driver capabilities. Missing and conflicting information stays explicit.
+- Explicit connection-format changes using `CADisplay`, with native 64-bit mode IDs and readback confirmation. No BetterDisplay installation is required.
+- Read-only refresh after display changes, wake and periodic polling. Opening the app or selecting a display does not reconfigure the connection.
+- English and Simplified Chinese resources, system appearance and native controls.
+- A native RGB preference section with EDID change previews, export, administrator-authorized installation and restoration of the original override. Installation is followed by manual reconnection and output verification.
 
-- macOS 13.0 or later (built and verified on Apple Silicon, macOS 27)
-- No third-party apps. BetterDisplay is not needed (and can be uninstalled).
+## Requirements and build
 
-## Quick start
+Apple Silicon, macOS 13.0 or later, and an installed Xcode toolchain selected through `xcode-select` or `DEVELOPER_DIR`. The native app has no third-party dependencies and does not need Python. Python 3 is needed only for the optional command-line EDID tool and its tests.
+
+From this checkout:
 
 ```bash
-git clone <this repo>
-cd FuyaoColorLock
 scripts/build-app.sh
 open build/FuyaoColorLock.app
 ```
 
-The menu-bar panel opens with one tab per external display. Tabs animate their height smoothly when switching, the macOS-recorded current mode is shown per display (with a "current" badge on the matching row when available), and selecting a mode pins it, enables that display's lock, and immediately re-detects displays for feedback. Each tab shows the active timing and the color modes the driver actually offers on it (top row = driver preference, nothing preselected), plus an independent lock toggle. Selecting a mode pins it and enables that display's lock; after display events the app re-detects displays to nudge mode selection back into bounds.
+The script packages an optimized arm64 app with localization resources and verifies its ad hoc signature before replacing the previous build. The app is not notarized. Build 2 retains marketing version 1.0.
 
-### Locking out YCbCr for good
+## Reading the panel
+
+| Information | Meaning |
+| --- | --- |
+| Live connection | The current native system mode, including timing, format, range, bit depth and reported gamut. |
+| macOS record | Saved WindowServer fields. Records may be absent, old or conflicting; they are not live measurements. |
+| Mode options | Native modes compatible with the current timing offer Apply when the setter is available. Other timings and driver-only entries remain view-only. |
+| Previous target | An unresolved numeric ID saved by an older version. Driver IDs can change; it is not converted into a guessed color format. |
+| Refresh | Reads the catalog and saved records again without switching modes. |
+
+Choose **Apply** beside a compatible mode. A brief blank screen can occur during link negotiation. The panel reports the request as pending until readback confirms the mode, or explicitly leaves it unconfirmed. Unsupported choices cannot be clicked. Clearing a legacy preference does not change the display. Driver timing and colorimetry are never guessed when unavailable or undecoded.
+
+## Optional EDID override
+
+In the panel, select a display and open **Prefer RGB with EDID override**:
+
+- **Export** saves a plist without changing the system.
+- **Install** previews the change, asks for confirmation and uses the macOS administrator prompt. It preserves existing plist fields and backs up the original file before installing the modified EDID.
+- **Restore** restores the original file byte-for-byte, or removes the app's override if none existed before. External changes cause restoration to stop rather than overwrite them.
+
+Overrides are scoped by vendor and product IDs, so they can affect multiple displays of the same model. The app reports file installation separately from live output. Reconnect after installing or restoring. Full RGB still requires hardware verification. This is an OS-level override, not a write to the display's EEPROM.
+
+The optional command-line equivalent generates a file only:
 
 ```bash
-python3 scripts/patch-edid.py --name "Redmi 27 NU" --outdir build/edid-override
+python3 scripts/patch-edid.py --name "Your display name" --outdir build/edid-override
 ```
 
-The script patches the live EDID (clears CEA-861 YCbCr 4:4:4/4:2:2 bits and any 4:2:0 capability map, fixes checksums) and prints the exact `sudo` commands to install the override into `/Library/Displays/Contents/Resources/Overrides/`. Unplug and replug the display afterwards. To revert, delete the file and replug.
+This generates a file and prints installation instructions; it does not install anything. An unavailable display or invalid EDID causes an error instead of a patch. Inspect the file before following the printed privileged installation command, and back up any existing override at that path first. Reconnect the display after installation. To roll back, restore the backup or remove only the newly installed override, then reconnect.
 
-## How it works
+The patch clears CTA YCbCr 4:4:4 and 4:2:2 flags and removes CTA YCbCr 4:2:0 video and capability-map blocks, preserving other extensions and detailed timings. It **does not select** a bit depth, Full Range, SDR, HDR, sRGB or P3. Driver behavior and advertisements outside the patched fields can still affect the negotiated link. Verify the result on the connected display.
 
-- Display enumeration pairs CG online displays with their framebuffer shim via `SLSCopyDisplayInfoDictionary`'s `IODisplayLocation` (controller segment like `disp0@…`); names come from CoreDisplay's info dictionary.
-- Color mode fields were verified against BetterDisplay's own list on macOS 27: `PixelEncoding` 0=RGB / 2=YCbCr 4:2:0 / 3=4:4:4 / 6=4:2:2, `DynamicRange` 1=Full / 0=Limited, `EOTF` 0=SDR / 2=HDR10; `DPTimingModeId` identifies the active timing.
-- What the app deliberately does **not** do: writing the connection mode directly. That path lives in a closed-source IOKit channel (verified: it is not the CGS display-mode API, not IORegistry properties, and not the `SLSDisplay*Preset` family). The EDID override plus event-driven re-detection achieves the lock without it.
+## Architecture and validation
 
-## Project structure
+SwiftUI renders the panel in an AppKit `NSPopover`. CoreGraphics enumerates displays; IORegistry supplies timing tables and EDID data. SkyLight and CoreDisplay associate displays with framebuffers and saved records. QuartzCore's private `CADisplay` and `CADisplayMode` provide native live modes and the setting path. Runtime ABI checks and fresh mode enumeration guard every request; unsupported APIs leave the options view-only. See [the implementation evidence](docs/PRIVATE_DISPLAY_API.md).
 
+```text
+Sources/FuyaoColorLock/   Catalog, state, settings and native panel
+Resources/               Bundle metadata and localized strings
+scripts/build-app.sh      Optimized local app packaging
+scripts/test-models.sh    Offline display-model regression tests
+scripts/test.sh           All offline regression checks
+scripts/patch-edid.py     Optional EDID override generator
+Tests/                   Offline regression fixtures and assertions
 ```
-Sources/FuyaoColorLock/   Swift sources (catalog, guard, menu-bar UI, SLS bridges)
-scripts/build-app.sh      builds build/FuyaoColorLock.app (resolves tools via xcrun)
-scripts/patch-edid.py     EDID override generator (strip YCbCr)
-Resources/Info.plist      bundle metadata (LSUIElement menu-bar app)
-```
+
+See [VALIDATION.md](docs/VALIDATION.md) for checks and remaining manual acceptance steps.
 
 ## Privacy
 
-No network access, no sandbox, no accessibility permissions. Everything is local IORegistry/CoreGraphics reads plus the optional EDID override you install yourself.
+Display information and preferences stay local. The app reads IORegistry, CoreGraphics and saved WindowServer records. It does not send display identifiers. EDID export and installation occur only after an explicit action; macOS handles administrator credentials. Managed originals are stored beside the override directory in `.FuyaoColorLock` for restoration.
 
 ## License
 

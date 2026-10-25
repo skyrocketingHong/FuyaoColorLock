@@ -28,7 +28,13 @@ struct ColorModeEntry: Identifiable, Hashable {
         }
     }
 
-    var rangeName: String { dynamicRange == 1 ? "Full" : "Limited" }
+    var rangeName: String {
+        switch dynamicRange {
+        case 1: return "Full"
+        case 0: return "Limited"
+        default: return "Range \(dynamicRange)"
+        }
+    }
 
     var transferName: String {
         switch eotf {
@@ -40,14 +46,7 @@ struct ColorModeEntry: Identifiable, Hashable {
     }
 
     var colorimetryName: String {
-        switch colorimetry {
-        case 0, 1: return "" // ITU defaults, same label BetterDisplay shows without suffix
-        case 7: return "BT.2020"
-        case 9: return "P3"
-        case 10: return "sRGB"
-        case 16: return "Panel Native"
-        default: return "Colorimetry \(colorimetry)"
-        }
+        "Colorimetry \(colorimetry)"
     }
 
     /// Menu title in the BetterDisplay style, e.g. "8-bit SDR RGB Full".
@@ -66,7 +65,9 @@ struct DisplayTiming: Identifiable, Hashable {
     let refreshRateHz: Double
     let modes: [ColorModeEntry]
 
-    var label: String { "\(width)×\(height) @ \(String(format: "%.0f", refreshRateHz))Hz" }
+    var label: String {
+        "\(width) × \(height) · \(refreshRateHz.formatted(.number.precision(.fractionLength(0...2)))) Hz"
+    }
 }
 
 /// A physical external display with its driver-published timing table.
@@ -78,33 +79,54 @@ struct PhysicalDisplay: Identifiable, Hashable {
     let timings: [DisplayTiming]
     /// `DPTimingModeId` registry value: ID of the currently active timing.
     let currentTimingID: Int?
-    /// Last configured connection mode from the WindowServer plist, if recorded.
-    let configuredLinkMode: LinkDescription?
+    let recordedLinkState: RecordedLinkState
+    /// EDID from a matched framebuffer or a unique hardware-identity match.
+    /// Raw bytes stay in memory until the user explicitly installs an override.
+    let edid: Data?
+    let liveConnection: LiveDisplayConnection?
+
+    var legacySettingsID: String { "\(name)-\(cgDirectDisplayID)" }
+
+    var configuredLinkMode: LinkDescription? {
+        if case .recorded(let link) = recordedLinkState { return link }
+        return nil
+    }
 
     var currentTiming: DisplayTiming? {
         if let id = currentTimingID, let exact = timings.first(where: { $0.id == id }) {
             return exact
         }
-        // Fallback while the driver has not published the active timing ID
-        // (e.g. right after a link reset): the timing with the best-scoring
-        // mode is the panel's preferred one.
-        return timings.max { a, b in
-            (a.modes.map(\.score).max() ?? 0) < (b.modes.map(\.score).max() ?? 0)
-        }
+        return nil
     }
 
     /// Color modes of the active timing, most preferred first.
     var currentModes: [ColorModeEntry] {
-        (currentTiming?.modes ?? []).sorted { $0.score > $1.score }
+        (currentTiming?.modes ?? []).sorted {
+            $0.score == $1.score ? $0.modeID < $1.modeID : $0.score > $1.score
+        }
     }
 
-    /// The catalog entry matching the WindowServer-recorded link mode, if any.
+    /// Formats advertised across all timings. This does not imply that each
+    /// format is available for the currently active timing.
+    var allSupportedModes: [ColorModeEntry] {
+        let sorted = timings.flatMap(\.modes).sorted {
+            if $0.score != $1.score { return $0.score > $1.score }
+            if $0.title != $1.title { return $0.title < $1.title }
+            if $0.timingID != $1.timingID { return $0.timingID < $1.timingID }
+            return $0.modeID < $1.modeID
+        }
+        var seen: Set<[Int]> = []
+        return sorted.filter {
+            seen.insert([$0.pixelEncoding, $0.depth, $0.dynamicRange, $0.eotf, $0.colorimetry]).inserted
+        }
+    }
+
+    /// Only a unique record match can identify a row. The record does not
+    /// contain colorimetry, so even this is not a live link verification.
     var configuredModeEntry: ColorModeEntry? {
         guard let link = configuredLinkMode else { return nil }
-        return currentModes.first { $0.pixelEncoding == link.pixelEncoding
-            && $0.depth == link.bitDepth
-            && $0.dynamicRange == link.range
-            && $0.eotf == link.eotf }
+        let matches = currentModes.filter { link.matches($0) }
+        return matches.count == 1 ? matches.first : nil
     }
 }
 
@@ -116,6 +138,11 @@ struct LinkDescription: Hashable {
     let eotf: Int
     let pixelEncoding: Int
 
+    func matches(_ mode: ColorModeEntry) -> Bool {
+        pixelEncoding == mode.pixelEncoding && bitDepth == mode.depth
+            && range == mode.dynamicRange && eotf == mode.eotf
+    }
+
     var title: String {
         let enc: String
         switch pixelEncoding {
@@ -125,9 +152,22 @@ struct LinkDescription: Hashable {
         case 6: enc = "YCbCr 4:2:2"
         default: enc = "Encoding \(pixelEncoding)"
         }
-        let transfer = eotf == 0 ? "SDR" : (eotf == 2 ? "HDR10" : "HDR")
-        return "\(bitDepth)-bit \(transfer) \(enc) \(range == 1 ? "Full" : "Limited")"
+        let transfer: String
+        switch eotf {
+        case 0: transfer = "SDR"
+        case 1: transfer = "HDR"
+        case 2: transfer = "HDR10"
+        default: transfer = "EOTF \(eotf)"
+        }
+        let rangeName = range == 1 ? "Full" : (range == 0 ? "Limited" : "Range \(range)")
+        return "\(bitDepth)-bit \(transfer) \(enc) \(rangeName)"
     }
+}
+
+enum RecordedLinkState: Hashable {
+    case unavailable
+    case conflicting
+    case recorded(LinkDescription)
 }
 
 /// Reads the display topology from CoreGraphics + IORegistry; fully
@@ -138,38 +178,103 @@ struct LinkDescription: Hashable {
 /// the matching `IOMobileFramebufferShim` service (timing table + current
 /// timing). Display names come from CoreDisplay's info dictionary.
 enum DisplayCatalog {
+    enum SnapshotError: Error { case onlineDisplaysUnavailable }
+
     static func snapshot() -> [PhysicalDisplay] {
-        var ids = [CGDirectDisplayID](repeating: 0, count: 16)
+        (try? snapshotResult().get()) ?? []
+    }
+
+    static func snapshotResult() -> Result<[PhysicalDisplay], SnapshotError> {
         var count: UInt32 = 0
-        guard CGGetOnlineDisplayList(16, &ids, &count) == .success else { return [] }
+        guard CGGetOnlineDisplayList(0, nil, &count) == .success else {
+            return .failure(.onlineDisplaysUnavailable)
+        }
+        if count == 0 { return .success([]) }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetOnlineDisplayList(count, &ids, &count) == .success else {
+            return .failure(.onlineDisplaysUnavailable)
+        }
 
         let shimsBySegment = framebufferShimsBySegment()
+        let transportEDIDs = activeTransportEDIDs()
         let nameFor = Self.displayName
         let linkModes = WindowServerLinkModes.load()
 
         var displays: [PhysicalDisplay] = []
         for displayID in ids.prefix(Int(count)) where CGDisplayIsBuiltin(displayID) == 0 {
-            guard let segment = controllerSegment(ofDisplay: displayID),
-                  let shim = shimsBySegment[segment],
-                  let timings = shim.timings, !timings.isEmpty else { continue }
+            let shim = controllerSegment(ofDisplay: displayID).flatMap { shimsBySegment[$0] }
             let name = nameFor(displayID) ?? "Display"
             let uuid = uuidString(of: displayID)
+            let native = CoreDisplayModes.snapshot(for: displayID)
+            let live = native.map {
+                LiveDisplayConnection(currentMode: $0.currentMode, modes: $0.modes,
+                                      isWritable: $0.isWritable && uuid != nil)
+            }
+            let edid = shim?.edid ?? matchingEDID(
+                vendor: CGDisplayVendorNumber(displayID), product: CGDisplayModelNumber(displayID),
+                serial: CGDisplaySerialNumber(displayID), candidates: transportEDIDs)
             displays.append(PhysicalDisplay(
-                id: "\(name)-\(displayID)",
+                id: uuid.map { "uuid-\($0)" } ?? "\(name)-\(displayID)",
                 name: name,
                 cgDirectDisplayID: displayID,
                 uuidString: uuid,
-                timings: timings,
-                currentTimingID: shim.currentTimingID,
-                configuredLinkMode: uuid.flatMap { linkModes[$0] }))
+                timings: shim?.timings ?? [],
+                currentTimingID: shim?.currentTimingID,
+                recordedLinkState: uuid.flatMap { linkModes[$0] } ?? .unavailable,
+                edid: edid,
+                liveConnection: live))
         }
-        return displays
+        return .success(displays.sorted {
+            $0.name == $1.name ? $0.id < $1.id : $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        })
     }
 
     private static func uuidString(of displayID: CGDirectDisplayID) -> String? {
         guard let uuid = SLSBridge.uuid(for: displayID) else { return nil }
         guard let cfString = CFUUIDCreateString(nil, uuid) else { return nil }
         return (cfString as String).uppercased()
+    }
+
+    static func stableIdentity(for displayID: CGDirectDisplayID) -> String? {
+        guard CGDisplayIsOnline(displayID) != 0 else { return nil }
+        return uuidString(of: displayID).map { "uuid-\($0)" }
+    }
+
+    /// Some Apple Silicon systems publish EDID on a transport branch rather
+    /// than the framebuffer. Reject repeated identities instead of guessing.
+    static func matchingEDID(vendor: UInt32, product: UInt32, serial: UInt32, candidates: [Data]) -> Data? {
+        guard vendor != 0, product != 0 else { return nil }
+        let matches = candidates.filter { data in
+            let bytes = [UInt8](data)
+            guard bytes.count >= 128,
+                  Array(bytes.prefix(8)) == [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00] else {
+                return false
+            }
+            let edidVendor = UInt32(bytes[8]) << 8 | UInt32(bytes[9])
+            let edidProduct = UInt32(bytes[10]) | UInt32(bytes[11]) << 8
+            let edidSerial = UInt32(bytes[12]) | UInt32(bytes[13]) << 8
+                | UInt32(bytes[14]) << 16 | UInt32(bytes[15]) << 24
+            return edidVendor == vendor && edidProduct == product && edidSerial == serial
+        }
+        return matches.count == 1 ? matches.first : nil
+    }
+
+    private static func activeTransportEDIDs() -> [Data] {
+        var iterator = io_iterator_t()
+        guard IOServiceGetMatchingServices(kIOMainPortDefault,
+            IOServiceMatching("IOPortTransportStateDisplayPort"), &iterator) == KERN_SUCCESS else { return [] }
+        defer { IOObjectRelease(iterator) }
+        var result: [Data] = []
+        var service = IOIteratorNext(iterator)
+        while service != 0 {
+            defer { IOObjectRelease(service); service = IOIteratorNext(iterator) }
+            guard let properties = registryProperties(of: service),
+                  properties["Active"] as? Bool == true,
+                  let metadata = properties["Metadata"] as? [String: Any],
+                  let data = metadata["EDID"] as? Data else { continue }
+            result.append(data)
+        }
+        return result
     }
 
     // MARK: - CG display → controller segment
@@ -197,6 +302,7 @@ enum DisplayCatalog {
     private struct ShimInfo {
         var timings: [DisplayTiming]?
         var currentTimingID: Int?
+        var edid: Data?
     }
 
     private static func framebufferShimsBySegment() -> [String: ShimInfo] {
@@ -208,6 +314,7 @@ enum DisplayCatalog {
         defer { IOObjectRelease(iterator) }
 
         var result: [String: ShimInfo] = [:]
+        var ambiguous: Set<String> = []
         var service = IOIteratorNext(iterator)
         while service != 0 {
             defer { IOObjectRelease(service); service = IOIteratorNext(iterator) }
@@ -217,14 +324,22 @@ enum DisplayCatalog {
             guard let segment = path.split(separator: "/").first(where: { $0.hasPrefix("disp") })
                 .map(String.init) else { continue }
             guard let dict = registryProperties(of: service) else { continue }
+            guard !ambiguous.contains(segment) else { continue }
+            if result[segment] != nil {
+                result.removeValue(forKey: segment)
+                ambiguous.insert(segment)
+                continue
+            }
+            let metadata = dict["Metadata"] as? [String: Any]
             result[segment] = ShimInfo(
                 timings: parseTimings(dict["TimingElements"] as? [[String: Any]]),
-                currentTimingID: dict["DPTimingModeId"] as? Int)
+                currentTimingID: dict["DPTimingModeId"] as? Int,
+                edid: metadata?["EDID"] as? Data)
         }
         return result
     }
 
-    private static func parseTimings(_ raw: [[String: Any]]?) -> [DisplayTiming]? {
+    static func parseTimings(_ raw: [[String: Any]]?) -> [DisplayTiming]? {
         guard let raw else { return nil }
         var timings: [DisplayTiming] = []
         for t in raw {
@@ -238,16 +353,25 @@ enum DisplayCatalog {
             let vPrecise = vAttr["PreciseSyncRate"] as? Int ?? (vAttr["SyncRate"] as? Int ?? 0)
             var modes: [ColorModeEntry] = []
             for m in modesRaw {
-                guard let modeID = m["ID"] as? Int else { continue }
+                guard let modeID = m["ID"] as? Int,
+                      let pixelEncoding = m["PixelEncoding"] as? Int,
+                      let depth = m["Depth"] as? Int,
+                      let dynamicRange = m["DynamicRange"] as? Int,
+                      let eotf = m["EOTF"] as? Int,
+                      let colorimetry = m["Colorimetry"] as? Int else { continue }
                 modes.append(ColorModeEntry(
                     timingID: timingID,
                     modeID: modeID,
-                    pixelEncoding: m["PixelEncoding"] as? Int ?? 0,
-                    depth: m["Depth"] as? Int ?? 8,
-                    dynamicRange: m["DynamicRange"] as? Int ?? 0,
-                    eotf: m["EOTF"] as? Int ?? 0,
-                    colorimetry: m["Colorimetry"] as? Int ?? 0,
+                    pixelEncoding: pixelEncoding,
+                    depth: depth,
+                    dynamicRange: dynamicRange,
+                    eotf: eotf,
+                    colorimetry: colorimetry,
                     score: m["Score"] as? Int ?? 0))
+            }
+            let grouped = Dictionary(grouping: modes, by: \.id)
+            modes = grouped.values.compactMap { entries in
+                Set(entries).count == 1 ? entries.first : nil
             }
             guard !modes.isEmpty else { continue }
             timings.append(DisplayTiming(id: timingID, width: width, height: height,
@@ -302,37 +426,59 @@ private enum CoreDisplayBridge {
 
 }
 
-/// Reads the last recorded connection mode per display UUID from WindowServer's
-/// per-host plist. This records what macOS last configured, which is the best
-/// available "current mode" source without BetterDisplay.
-private enum WindowServerLinkModes {
-    static func load() -> [String: LinkDescription] {
+/// WindowServer stores historical configurations, not a live link readback.
+/// Without an authoritative active-config marker, differing records are ambiguous.
+enum WindowServerLinkModes {
+    static func load() -> [String: RecordedLinkState] {
         let byHost = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Preferences/ByHost")
         guard let files = try? FileManager.default.contentsOfDirectory(
             at: byHost, includingPropertiesForKeys: nil) else { return [:] }
 
-        var result: [String: LinkDescription] = [:]
-        for file in files where file.lastPathComponent.hasPrefix("com.apple.windowserver.displays.") {
+        var plists: [[String: Any]] = []
+        for file in files where file.lastPathComponent.hasPrefix("com.apple.windowserver.displays.")
+            && file.pathExtension == "plist" {
             guard let data = try? Data(contentsOf: file),
                   let plist = try? PropertyListSerialization.propertyList(
-                    from: data, options: [], format: nil) as? [String: Any],
-                  let sets = plist["DisplaySets"] as? [String: Any],
+                    from: data, options: [], format: nil) as? [String: Any] else { continue }
+            plists.append(plist)
+        }
+        return parse(plists)
+    }
+
+    static func parse(_ plists: [[String: Any]]) -> [String: RecordedLinkState] {
+        var candidates: [String: Set<LinkDescription>] = [:]
+        var incomplete: Set<String> = []
+        for plist in plists {
+            guard let sets = plist["DisplaySets"] as? [String: Any],
                   let configs = sets["Configs"] as? [[String: Any]] else { continue }
-            // Later config sets are newer; last write wins.
             for config in configs {
                 guard let displayConfigs = config["DisplayConfig"] as? [[String: Any]] else { continue }
                 for dc in displayConfigs {
-                    guard let uuid = dc["UUID"] as? String,
-                          let link = dc["LinkDescription"] as? [String: Any] else { continue }
-                    result[uuid.uppercased()] = LinkDescription(
-                        range: link["Range"] as? Int ?? 0,
-                        bitDepth: link["BitDepth"] as? Int ?? 8,
-                        eotf: link["EOTF"] as? Int ?? 0,
-                        pixelEncoding: link["PixelEncoding"] as? Int ?? 0)
+                    guard let value = dc["UUID"] as? String else { continue }
+                    let uuid = value.uppercased()
+                    guard let link = dc["LinkDescription"] as? [String: Any] else { continue }
+                    guard let range = link["Range"] as? Int,
+                          let bitDepth = link["BitDepth"] as? Int,
+                          let eotf = link["EOTF"] as? Int,
+                          let pixelEncoding = link["PixelEncoding"] as? Int else {
+                        incomplete.insert(uuid)
+                        continue
+                    }
+                    candidates[uuid, default: []].insert(LinkDescription(
+                        range: range, bitDepth: bitDepth, eotf: eotf, pixelEncoding: pixelEncoding))
                 }
             }
         }
+        var result: [String: RecordedLinkState] = [:]
+        for (uuid, entries) in candidates {
+            if entries.count > 1 {
+                result[uuid] = .conflicting
+            } else if let entry = entries.first {
+                result[uuid] = .recorded(entry)
+            }
+        }
+        for uuid in incomplete { result[uuid] = .unavailable }
         return result
     }
 }
