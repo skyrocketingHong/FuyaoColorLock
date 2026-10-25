@@ -126,13 +126,16 @@ enum CoreDisplayModes {
         let containsCurrent = modes.filter { $0 == current }.count == 1
         return LiveDisplayConnection(currentMode: current, modes: uniqueIDs ? modes : [],
             isWritable: uniqueIDs && containsCurrent && setter(on: display) != nil
-                && DisplayCatalog.stableIdentity(for: displayID) != nil)
+                && DisplayCatalog.stableIdentity(for: displayID) != nil && CGDisplayIsAsleep(displayID) == 0)
     }
 
     @MainActor
     static func requestApply(_ target: NativeConnectionMode, to displayID: CGDirectDisplayID,
                              expectedCurrent: NativeConnectionMode, expectedDisplayIdentity: String) -> ApplyRequest {
-        guard DisplayCatalog.stableIdentity(for: displayID) == expectedDisplayIdentity,
+        // Check the current hardware state even if the app started after the
+        // sleep notification, or the display slept during mode enumeration.
+        guard CGDisplayIsAsleep(displayID) == 0,
+              DisplayCatalog.stableIdentity(for: displayID) == expectedDisplayIdentity,
               let display = displayObject(for: displayID),
               let currentObject = object(display, "currentMode"),
               let current = mode(currentObject),
@@ -147,7 +150,8 @@ enum CoreDisplayModes {
         }
         let candidates = available.filter { mode($0) == target }
         guard candidates.count == 1, let selected = candidates.first,
-              DisplayCatalog.stableIdentity(for: displayID) == expectedDisplayIdentity else { return .unavailable }
+              DisplayCatalog.stableIdentity(for: displayID) == expectedDisplayIdentity,
+              CGDisplayIsAsleep(displayID) == 0 else { return .unavailable }
         typealias Setter = @convention(c) (AnyObject, Selector, AnyObject) -> Void
         unsafeBitCast(implementation, to: Setter.self)(display, NSSelectorFromString("setCurrentMode:"), selected)
         return .requested

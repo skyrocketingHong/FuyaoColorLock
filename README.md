@@ -17,14 +17,14 @@
 
 Fuyao Color Lock reads live system connection modes and can request a supported format change through the native display API. The panel separates live mode information, driver-advertised capabilities and older macOS configuration records.
 
-**Only native modes compatible with the current resolution, refresh rate, HDR state and VRR state can be applied.** Other modes remain view-only. A successful action requires repeated system readback matching the requested mode; it is not an independent measurement of HDMI output or panel gamut. The app does not change ICC profiles or automatically reapply a mode after waking.
+**Only native modes compatible with the current resolution, refresh rate, HDR state and VRR state can be applied.** Other modes remain view-only. A successful action requires repeated system readback matching the requested mode; it is not an independent measurement of HDMI output or panel gamut. The app does not change ICC profiles. Automatic restoration requires explicitly enabling the mode lock for that display.
 
 ## Features
 
 - A native popover with a fixed canvas and internal scrolling. Switching displays does not resize the panel to fit a different number of modes.
 - Separate display timing, macOS records and driver capabilities. Missing and conflicting information stays explicit.
 - Explicit connection-format changes using `CADisplay`, with native 64-bit mode IDs and readback confirmation. No BetterDisplay installation is required.
-- Read-only refresh after display changes, wake and periodic polling. Opening the app or selecting a display does not reconfigure the connection.
+- Per-display mode locking after explicit opt-in. Display changes, wake and periodic checks can restore the saved format while preserving the current timing; unlocked displays remain read-only during refresh.
 - English and Simplified Chinese resources, system appearance and native controls.
 - A native RGB preference section with EDID change previews, export, administrator-authorized installation and restoration of the original override. Installation is followed by manual reconnection and output verification.
 
@@ -39,7 +39,7 @@ scripts/build-app.sh
 open build/FuyaoColorLock.app
 ```
 
-The script packages an optimized arm64 app with localization resources and verifies its ad hoc signature before replacing the previous build. The app is not notarized. Build 2 retains marketing version 1.0.
+The script uses the selected SDK through `xcrun` (validated with macOS 27.2 and Swift 6.4.2), packages an optimized arm64 app with localization resources and verifies its ad hoc signature before replacing the previous build. Native macOS 26 and 27 controls are used where available, with macOS 13 fallbacks. The app is not notarized. Build 3 retains marketing version 1.0.
 
 ## Reading the panel
 
@@ -49,9 +49,20 @@ The script packages an optimized arm64 app with localization resources and verif
 | macOS record | Saved WindowServer fields. Records may be absent, old or conflicting; they are not live measurements. |
 | Mode options | Native modes compatible with the current timing offer Apply when the setter is available. Other timings and driver-only entries remain view-only. |
 | Previous target | An unresolved numeric ID saved by an older version. Driver IDs can change; it is not converted into a guessed color format. |
-| Refresh | Reads the catalog and saved records again without switching modes. |
+| Refresh | Reads the current state and checks enabled locks. Only an explicitly enabled lock may restore its saved mode. |
 
 Choose **Apply** beside a compatible mode. A brief blank screen can occur during link negotiation. The panel reports the request as pending until readback confirms the mode, or explicitly leaves it unconfirmed. Unsupported choices cannot be clicked. Clearing a legacy preference does not change the display. Driver timing and colorimetry are never guessed when unavailable or undecoded.
+
+## Mode lock
+
+The panel is ordered **color mode switching and lock → installation configuration → app settings and About**. The lock switch is in the first section, alongside the live connection information and mode choices.
+
+1. Apply the desired compatible mode and check that system readback confirms it.
+2. Enable **Lock color mode**. **Locked target** shows the format and timing being retained. Each display has an independent lock, disabled by default; old numeric target preferences do not silently enable it.
+3. Keep the app running. After wake, reconnection or detected drift, it looks for a unique current native mode matching the saved parameters, restores it when compatible and verifies the result. Changing driver mode IDs after reconnection does not change the saved target.
+4. A confirmed manual mode change while locked updates the locked target. To stop automatic restoration, turn off the switch; this does not itself change the current mode. Use **Launch at Login** in **Application settings** if the app should resume monitoring after login.
+
+A different resolution, refresh rate, HDR or VRR state suspends restoration rather than forcing the old timing. Missing data, disconnected displays and sleeping screens remain waiting or unavailable. Failed restoration retries after 5 and 15 seconds, then pauses after three consecutive failures. Automatic setting requests are also limited to three per 60 seconds. Inspect the live mode before choosing **Retry mode lock**. An enabled switch means the preference is active, while the adjacent status explains whether the system mode actually matches.
 
 ## Optional EDID override
 
@@ -73,6 +84,8 @@ This generates a file and prints installation instructions; it does not install 
 
 The patch clears CTA YCbCr 4:4:4 and 4:2:2 flags and removes CTA YCbCr 4:2:0 video and capability-map blocks, preserving other extensions and detailed timings. It **does not select** a bit depth, Full Range, SDR, HDR, sRGB or P3. Driver behavior and advertisements outside the patched fields can still affect the negotiated link. Verify the result on the connected display.
 
+**Application settings** and **About** follow installation configuration in the panel. Login startup uses the system service, and About opens the standard macOS panel with the application's actual version and copyright information.
+
 ## Manually verify a change
 
 ### Check the live mode after applying a format
@@ -81,7 +94,7 @@ The patch clears CTA YCbCr 4:4:4 and 4:2:2 flags and removes CTA YCbCr 4:2:0 vid
 2. In **Connection mode options**, apply a listed RGB Full mode. For example, `8-bit · SDR · RGB Full · sRGB` reports 8-bit SDR with full-range RGB; `sRGB` alone does not establish the encoding or range. Resolution, refresh rate, HDR and VRR state should remain unchanged.
 3. Allow several seconds for **Latest mode change** to show **System read-back matched the requested mode after the change.** The app requires two complete matching reads 0.5 seconds apart, with a six-second verification window. **The selected mode has not been confirmed** is not a success result.
 4. Click **Refresh** or press **⌘R**. Check that **Last read** advances and **Live connection mode** still shows the requested format. If it shows `YCbCr` or `RGB Limited`, the current system mode does not meet the RGB Full target. If the live mode is unavailable, the result remains unverified.
-5. To check whether the result survives renegotiation, repeat the read after sleep/wake or after reconnecting the HDMI cable. A successful read before reconnection does not prove persistence; the app does not automatically reapply a mode.
+5. To check whether the result survives renegotiation, repeat the read after sleep/wake or after reconnecting the HDMI cable. With the lock off, this checks what macOS retained. With the lock on, also check **Locked target** and the lock status: restoration must finish with the live mode matching the target. Merely staying in the same mode does not exercise the restoration path. Turn off the lock when you want to inspect negotiation without automatic correction.
 
 The driver mode list and **macOS record** are reference data, not the current-mode verdict. A **Current** label identifies the system-reported mode, not a physical signal measurement.
 

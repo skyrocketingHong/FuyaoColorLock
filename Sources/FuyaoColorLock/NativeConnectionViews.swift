@@ -164,6 +164,7 @@ private struct NativeModeRow: View {
                 Button("Apply") {
                     Task { await applyMode(mode) }
                 }
+                .modifier(PanelActionStyle())
                 .disabled(isBusy)
                 .accessibilityLabel(Text("Apply \(mode.title)", comment: "Apply button; the variable is the full connection format description."))
             } else {

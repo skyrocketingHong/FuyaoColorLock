@@ -58,19 +58,15 @@ struct EDIDSettingsView: View {
             }
         }
         .onAppear(perform: refreshStatus)
-        .onChange(of: display.id) { _ in refreshStatus() }
-        .onChange(of: lastRefreshAt) { _ in refreshStatus() }
-        .onChange(of: manager.isBusy) { busy in
-            if !busy { refreshStatus() }
+        .onPanelChange(of: display.id, perform: refreshStatus)
+        .onPanelChange(of: lastRefreshAt, perform: refreshStatus)
+        .onPanelChange(of: manager.isBusy) {
+            if !manager.isBusy { refreshStatus() }
         }
-        .alert("EDID override could not be completed", isPresented: Binding(
-            get: { manager.resultDisplayID == display.id && manager.lastError != nil },
-            set: { if !$0 { manager.dismissError() } }
-        )) {
-            Button("OK", role: .cancel) { manager.dismissError() }
-        } message: {
-            Text(manager.lastError ?? "")
-        }
+        .modifier(PanelErrorAlert(title: "EDID override could not be completed", message: Binding(
+            get: { manager.resultDisplayID == display.id ? manager.lastError : nil },
+            set: { if $0 == nil { manager.dismissError() } }
+        )))
     }
 
     private func refreshStatus() {
@@ -146,12 +142,15 @@ private struct EDIDActionButtons: View {
 
     var body: some View {
         Button("Export…") { manager.exportOverride(for: display) }
+            .modifier(PanelActionStyle())
             .disabled(status.patch?.hasChanges != true)
             .help("Save the override file without installing it.")
         Button("Install…") { manager.install(for: display) }
+            .modifier(PanelActionStyle())
             .disabled(status.patch?.hasChanges != true || status.installed || status.canRestore || status.hasConflictingInstall)
             .help("Install an RGB preference override with administrator approval.")
         Button("Restore…") { manager.restore(for: display) }
+            .modifier(PanelActionStyle())
             .disabled(!status.canRestore)
             .help("Restore the original override backed up by this app.")
     }

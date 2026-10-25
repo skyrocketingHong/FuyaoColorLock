@@ -67,7 +67,9 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         // Recreate the transient hosting tree so a previously used screen or
         // display page cannot leave stale scroll/safe-area geometry behind.
         let controller = PanelHostingController(
-            rootView: PanelContent(monitor: monitor, presentation: presentation, overrides: overrides)
+            rootView: PanelContent(monitor: monitor, presentation: presentation, overrides: overrides) { [weak self] in
+                self?.showAbout()
+            }
         )
         popover.contentViewController = controller
         synchronizeCanvas(size, controller: controller)
@@ -101,6 +103,8 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         menu.autoenablesItems = false
         let open = menu.addItem(withTitle: String(localized: "Open"), action: #selector(showPanel), keyEquivalent: "")
         open.target = self
+        let about = menu.addItem(withTitle: String(localized: "About Fuyao Color Lock…"), action: #selector(showAbout), keyEquivalent: "")
+        about.target = self
         menu.addItem(.separator())
         let quit = menu.addItem(withTitle: String(localized: "Quit"), action: #selector(quitApplication), keyEquivalent: "q")
         quit.target = self
@@ -112,6 +116,13 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
 
     @objc private func quitApplication() {
         NSApp.terminate(nil)
+    }
+
+    @objc private func showAbout() {
+        popover.performClose(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        let name = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "Fuyao Color Lock"
+        NSApp.orderFrontStandardAboutPanel(options: [.applicationName: name])
     }
 }
 

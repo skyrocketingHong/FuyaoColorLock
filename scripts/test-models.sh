@@ -9,5 +9,6 @@ xcrun swiftc -sdk "$(xcrun --show-sdk-path)" -target arm64-apple-macos13.0 \
   "$ROOT/Sources/FuyaoColorLock/DisplayCatalog.swift" \
   "$ROOT/Sources/FuyaoColorLock/CoreDisplayModes.swift" \
   "$ROOT/Sources/FuyaoColorLock/Settings.swift" \
+  "$ROOT/Sources/FuyaoColorLock/ModeLock.swift" \
   "$ROOT/Tests/DisplayModelTests.swift" -o "$OUTPUT"
 "$OUTPUT"
