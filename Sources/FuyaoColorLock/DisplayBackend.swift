@@ -11,6 +11,8 @@ struct DisplayBackend {
     var requestApply: (NativeConnectionMode, CGDirectDisplayID, NativeConnectionMode, String) -> CoreDisplayModes.ApplyRequest
     var wait: (UInt64) async throws -> Void
     var now: () -> Date
+    var displayIsAsleep: (CGDirectDisplayID) -> Bool? = { _ in nil }
+    var sessionAvailable: () -> Bool? = { true }
 
     static var live: DisplayBackend {
         DisplayBackend(
@@ -19,7 +21,20 @@ struct DisplayBackend {
             connection: { CoreDisplayModes.snapshot(for: $0) },
             requestApply: { CoreDisplayModes.requestApply($0, to: $1, expectedCurrent: $2, expectedDisplayIdentity: $3) },
             wait: { try await Task.sleep(nanoseconds: $0) },
-            now: Date.init
+            now: Date.init,
+            displayIsAsleep: { id in
+                guard CGDisplayIsOnline(id) != 0 else { return nil }
+                return CGDisplayIsAsleep(id) != 0
+            },
+            sessionAvailable: {
+                guard let session = CGSessionCopyCurrentDictionary() as? [String: Any],
+                      let onConsole = session[kCGSessionOnConsoleKey as String] as? Bool,
+                      let loginDone = session[kCGSessionLoginDoneKey as String] as? Bool else { return nil }
+                return onConsole && loginDone
+                    // This optional private hint is absent when unlocked on
+                    // current macOS. Only a known true value suppresses writes.
+                    && session["CGSSessionScreenIsLocked"] as? Bool != true
+            }
         )
     }
 }

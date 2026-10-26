@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import os
 
 enum ModeApplyResult: Equatable {
     case applying, confirmed, unconfirmed, unavailable, failed
@@ -22,6 +23,7 @@ final class DisplayGuard: ObservableObject {
     private let automaticScheduling: Bool
     private var refreshTask: Task<Void, Never>?
     private var scheduledLockTask: Task<Void, Never>?
+    private var wakeCheckTask: Task<Void, Never>?
     private var pollTimer: Timer?
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
     private var confirmedModes: [String: NativeConnectionMode] = [:]
@@ -30,12 +32,20 @@ final class DisplayGuard: ObservableObject {
     private var revisions: [String: UInt64] = [:]
     private var applyingDisplayID: String?
     private var isReconciling = false
-    private var isSleeping = false
+    private var wakeState = DisplayWakeState()
+    private var displayWakeStates: [String: DisplayWakeState] = [:]
+    private var displayPowerEpochs: [String: UInt64] = [:]
+    private var powerEpoch: UInt64 = 0
+    private var isSleeping: Bool { wakeState.isSuspended }
+    private let logger: Logger
 
     init(defaults: UserDefaults = .standard, backend: DisplayBackend? = nil, startObserving: Bool = true) {
         self.defaults = defaults
         self.backend = backend ?? .live
         automaticScheduling = startObserving
+        logger = startObserving
+            ? Logger(subsystem: "ing.fuyaoskyrocket.FuyaoColorLock", category: "ModeLock")
+            : Logger(OSLog.disabled)
         if startObserving { _ = PrivateSLS.ensureConnection() }
         reload()
         if startObserving {
@@ -79,6 +89,7 @@ final class DisplayGuard: ObservableObject {
             for identity in confirmedModes.keys { applyResults[identity] = .unconfirmed }
             confirmedModes.removeAll()
         }
+        refreshPowerState()
         updateLockStates()
     }
 
@@ -98,8 +109,8 @@ final class DisplayGuard: ObservableObject {
 
     func setModeLock(_ enabled: Bool, for display: PhysicalDisplay) {
         if enabled {
-            guard !isApplying, !isSleeping, !DisplayMutationGate.isBusy else { return }
             refreshCatalog()
+            guard !isApplying, !isSleeping, !DisplayMutationGate.isBusy else { return }
             guard let fresh = displays.first(where: { $0.id == display.id }), canCaptureTarget(for: fresh),
                   let mode = fresh.liveConnection?.currentMode else { return }
             saveTarget(ModeLockTarget(mode), for: fresh.id)
@@ -107,6 +118,7 @@ final class DisplayGuard: ObservableObject {
             revisions[display.id, default: 0] += 1
             targets.removeValue(forKey: display.id)
             retries.removeValue(forKey: display.id)
+            displayWakeStates.removeValue(forKey: display.id)
             Settings.setModeLockTarget(nil, for: display.id, defaults: defaults)
         }
         updateLockStates()
@@ -121,10 +133,11 @@ final class DisplayGuard: ObservableObject {
     }
 
     func apply(_ mode: NativeConnectionMode, to display: PhysicalDisplay) async {
-        guard !isApplying, !isSleeping, !DisplayMutationGate.isBusy else { return }
+        refreshCatalog()
+        guard !isApplying, !isSleeping, !isSuspended(display.id), !DisplayMutationGate.isBusy else { return }
         let revision = revisions[display.id, default: 0]
         let wasLocked = targets[display.id] != nil
-        let result = await performApply(mode, to: display)
+        let result = await performApply(mode, to: display).result
         if wasLocked, targets[display.id] != nil, revisions[display.id, default: 0] == revision {
             if result == .confirmed {
                 saveTarget(ModeLockTarget(mode), for: display.id)
@@ -132,6 +145,7 @@ final class DisplayGuard: ObservableObject {
                 // An uncertain manual change must not be immediately pulled
                 // back to the old lock target behind the user's action.
                 retries[display.id, default: ModeLockRetry()].pause()
+                logger.info("Mode lock paused; reason=manual-change-unconfirmed")
             }
         }
         updateLockStates()
@@ -140,7 +154,7 @@ final class DisplayGuard: ObservableObject {
 
     /// Called by the scheduler and by deterministic tests with a fake backend.
     func reconcileModeLocks() async {
-        guard !isReconciling, !isSleeping else { return }
+        guard !isReconciling else { return }
         isReconciling = true
         defer {
             isReconciling = false
@@ -148,53 +162,95 @@ final class DisplayGuard: ObservableObject {
             scheduleLockPass()
         }
         refreshCatalog()
+        guard !isSleeping else { return }
         for display in displays {
             guard !isSleeping else { break }
             guard let target = targets[display.id], !retry(for: display.id).isPaused,
+                  !isSuspended(display.id),
                   retry(for: display.id).delay(at: backend.now()) == 0 else { continue }
             guard !isApplying, !DisplayMutationGate.isBusy else { break }
             guard backend.identity(display.cgDirectDisplayID) == display.id else { continue }
             guard case .restore(let mode) = ModeLockDecision.evaluate(target: target, connection: display.liveConnection) else {
                 continue
             }
-            guard retries[display.id, default: ModeLockRetry()].allowsAttempt(at: backend.now()) else { continue }
+            guard retries[display.id, default: ModeLockRetry()].allowsAttempt(at: backend.now()) else {
+                logger.info("Mode lock paused; reason=automatic-rate-limit")
+                continue
+            }
             let revision = revisions[display.id, default: 0]
-            let result = await performApply(mode, to: display, automatic: true)
+            let epoch = powerEpoch
+            let displayEpoch = displayPowerEpochs[display.id, default: 0]
+            let outcome = await performApply(mode, to: display, automatic: true)
+            let result = outcome.result
             guard targets[display.id] == target, revisions[display.id, default: 0] == revision else { continue }
+            guard epoch == powerEpoch, displayEpoch == displayPowerEpochs[display.id, default: 0] else { continue }
             if result == .confirmed {
                 retries[display.id, default: ModeLockRetry()].confirmed()
-            } else if !isSleeping,
+            } else if !outcome.submitted {
+                retries[display.id, default: ModeLockRetry()].deferReadinessCheck(at: backend.now())
+            } else if outcome.submitted, !isSleeping, !isSuspended(display.id),
+                      backend.sessionAvailable() == true,
                       let current = displays.first(where: { $0.id == display.id }),
+                      backend.displayIsAsleep(current.cgDirectDisplayID) == false,
                       backend.identity(current.cgDirectDisplayID) == display.id,
                       case .restore = ModeLockDecision.evaluate(target: target, connection: current.liveConnection) {
                 retries[display.id, default: ModeLockRetry()].failed(at: backend.now())
+                logger.info("Automatic recovery unconfirmed; consecutiveFailures=\(self.retry(for: display.id).failures, privacy: .public)")
             }
         }
     }
 
-    func setSleeping(_ sleeping: Bool) {
-        isSleeping = sleeping
+    func setSleeping(_ sleeping: Bool, source: String = "explicit") {
+        let wasSuspended = isSleeping
         if sleeping {
+            wakeState.sleepHint(at: backend.now())
+            for identity in targets.keys { displayWakeStates[identity, default: DisplayWakeState()].sleepHint(at: backend.now()) }
             scheduledLockTask?.cancel()
             scheduledLockTask = nil
             refreshTask?.cancel()
+            logger.info("Sleep hint received; source=\(source, privacy: .public); automatic writes suspended")
         } else {
-            scheduleRefresh(delay: 4)
+            wakeState.wakeHint(at: backend.now())
+            for identity in targets.keys { displayWakeStates[identity, default: DisplayWakeState()].wakeHint(at: backend.now()) }
+            logger.info("Wake hint received; source=\(source, privacy: .public); checking hardware and session readiness")
         }
+        if !wasSuspended && isSleeping { powerEpoch &+= 1 }
         updateLockStates()
+        scheduleWakeCheck()
+    }
+
+    func sessionBecameActive() {
+        let wasSuspended = isSleeping
+        wakeState.wakeHint(at: backend.now(), trustedPowerEvent: false)
+        for identity in targets.keys {
+            displayWakeStates[identity, default: DisplayWakeState()].wakeHint(at: backend.now(), trustedPowerEvent: false)
+        }
+        if !wasSuspended && isSleeping { powerEpoch &+= 1 }
+        logger.info("Session activation hint received; rechecking observed availability")
+        updateLockStates()
+        scheduleWakeCheck()
+    }
+
+    private struct ApplyOutcome {
+        let result: ModeApplyResult
+        let submitted: Bool
     }
 
     private func performApply(_ mode: NativeConnectionMode, to display: PhysicalDisplay,
-                              automatic: Bool = false) async -> ModeApplyResult {
-        guard !isApplying, !isSleeping,
+                              automatic: Bool = false) async -> ApplyOutcome {
+        guard !isApplying, !isSleeping, !isSuspended(display.id),
+              backend.sessionAvailable() == true, backend.displayIsAsleep(display.cgDirectDisplayID) == false,
               let live = display.liveConnection, live.isWritable, DisplayMutationGate.begin() else {
             applyResults[display.id] = .unavailable
-            return .unavailable
+            refreshCatalog()
+            return ApplyOutcome(result: .unavailable, submitted: false)
         }
         isApplying = true
         applyingDisplayID = display.id
         applyResults[display.id] = .applying
         confirmedModes.removeValue(forKey: display.id)
+        let epoch = powerEpoch
+        let displayEpoch = displayPowerEpochs[display.id, default: 0]
         updateLockStates()
         defer {
             isApplying = false
@@ -208,37 +264,77 @@ final class DisplayGuard: ObservableObject {
         }), fresh.liveConnection?.isWritable == true,
               fresh.liveConnection?.currentMode == live.currentMode,
               backend.identity(display.cgDirectDisplayID) == display.id else {
-            return completeApply(.unavailable, mode: mode, displayID: display.id)
+            return completeApply(.unavailable, mode: mode, displayID: display.id, submitted: false)
         }
         switch backend.requestApply(mode, display.cgDirectDisplayID, live.currentMode, display.id) {
         case .unavailable:
-            return completeApply(.unavailable, mode: mode, displayID: display.id)
+            return completeApply(.unavailable, mode: mode, displayID: display.id, submitted: false)
         case .alreadyCurrent:
-            return completeApply(.confirmed, mode: mode, displayID: display.id)
+            return completeApply(.confirmed, mode: mode, displayID: display.id, submitted: false)
         case .requested:
             if automatic { retries[display.id, default: ModeLockRetry()].recordAttempt(at: backend.now()) }
+            logger.info("Mode request submitted; automatic=\(automatic, privacy: .public)")
             break
         }
 
         var verifier = ModeReadbackVerifier(expected: mode)
         for _ in 0..<12 {
             do { try await backend.wait(500_000_000) }
-            catch { return completeApply(.unconfirmed, mode: mode, displayID: display.id) }
-            guard !isSleeping, backend.identity(display.cgDirectDisplayID) == display.id else {
-                return completeApply(.unconfirmed, mode: mode, displayID: display.id)
+            catch { return completeApply(.unconfirmed, mode: mode, displayID: display.id, submitted: true) }
+            guard !isSleeping, !isSuspended(display.id), epoch == powerEpoch,
+                  displayEpoch == displayPowerEpochs[display.id, default: 0], backend.sessionAvailable() == true,
+                  backend.displayIsAsleep(display.cgDirectDisplayID) == false,
+                  backend.identity(display.cgDirectDisplayID) == display.id else {
+                return completeApply(.unconfirmed, mode: mode, displayID: display.id, submitted: true)
             }
             if verifier.observe(backend.connection(display.cgDirectDisplayID)?.currentMode) {
-                return completeApply(.confirmed, mode: mode, displayID: display.id)
+                return completeApply(.confirmed, mode: mode, displayID: display.id, submitted: true)
             }
         }
-        return completeApply(.unconfirmed, mode: mode, displayID: display.id)
+        return completeApply(.unconfirmed, mode: mode, displayID: display.id, submitted: true)
     }
 
-    private func completeApply(_ result: ModeApplyResult, mode: NativeConnectionMode, displayID: String) -> ModeApplyResult {
+    private func completeApply(_ result: ModeApplyResult, mode: NativeConnectionMode,
+                               displayID: String, submitted: Bool) -> ApplyOutcome {
         if result == .confirmed { confirmedModes[displayID] = mode }
         applyResults[displayID] = result
         refreshCatalog()
-        return applyResults[displayID] ?? result
+        logger.info("Mode readback completed; result=\(String(describing: self.applyResults[displayID] ?? result), privacy: .public)")
+        return ApplyOutcome(result: applyResults[displayID] ?? result, submitted: submitted)
+    }
+
+    private func refreshPowerState() {
+        let wasSuspended = isSleeping
+        let sessionAvailable = backend.sessionAvailable()
+        _ = wakeState.observe(
+            displaySleepStates: displays.map { backend.displayIsAsleep($0.cgDirectDisplayID) },
+            sessionAvailable: sessionAvailable, at: backend.now())
+        if !wasSuspended && isSleeping { powerEpoch &+= 1 }
+        if wasSuspended != isSleeping {
+            logger.info("Hardware/session availability changed; suspended=\(self.isSleeping, privacy: .public)")
+        }
+        var recoveryCount = 0
+        for identity in targets.keys {
+            let display = displays.first { $0.id == identity }
+            var state = displayWakeStates[identity] ?? DisplayWakeState()
+            let previouslySuspended = state.isSuspended
+            let recovered = state.observe(
+                displaySleepStates: display.map { [backend.displayIsAsleep($0.cgDirectDisplayID)] } ?? [],
+                sessionAvailable: sessionAvailable, at: backend.now())
+            if !previouslySuspended && state.isSuspended { displayPowerEpochs[identity, default: 0] &+= 1 }
+            displayWakeStates[identity] = state
+            if recovered {
+                retries[identity, default: ModeLockRetry()].resumeAfterWake()
+                recoveryCount += 1
+            }
+        }
+        if recoveryCount > 0 {
+            logger.info("Display/session recovery confirmed; recoveredLocks=\(recoveryCount, privacy: .public); manual pauses retained")
+        }
+    }
+
+    private func isSuspended(_ identity: String) -> Bool {
+        displayWakeStates[identity]?.isSuspended == true
     }
 
     private func saveTarget(_ target: ModeLockTarget, for displayID: String) {
@@ -252,6 +348,7 @@ final class DisplayGuard: ObservableObject {
 
     private func canCaptureTarget(for display: PhysicalDisplay) -> Bool {
         guard !isApplying, !isSleeping, display.uuidString != nil,
+              backend.sessionAvailable() == true, backend.displayIsAsleep(display.cgDirectDisplayID) == false,
               backend.identity(display.cgDirectDisplayID) == display.id,
               let live = display.liveConnection, live.isWritable, !live.currentMode.isVirtual else { return false }
         let target = ModeLockTarget(live.currentMode)
@@ -266,7 +363,8 @@ final class DisplayGuard: ObservableObject {
             var state = ModeLockState(isEnabled: target != nil,
                 canEnable: display.map(canCaptureTarget) ?? false, target: target)
             if let target {
-                if isSleeping { state.phase = .sleeping }
+                let lifecycle = displayWakeStates[identity] ?? wakeState
+                if lifecycle.isSuspended { state.phase = lifecycle.isKnownAsleep ? .sleeping : .waking }
                 else if applyingDisplayID == identity { state.phase = .restoring }
                 else if retry(for: identity).isPaused { state.phase = .paused }
                 else if let display, backend.identity(display.cgDirectDisplayID) == identity {
@@ -280,16 +378,25 @@ final class DisplayGuard: ObservableObject {
             }
             states[identity] = state
         }
-        if lockStates != states { lockStates = states }
+        if lockStates != states {
+            let pausedCount = states.values.filter { $0.phase == .paused }.count
+            let priorPausedCount = lockStates.values.filter { $0.phase == .paused }.count
+            if pausedCount != priorPausedCount {
+                logger.info("Paused lock count changed; count=\(pausedCount, privacy: .public)")
+            }
+            lockStates = states
+        }
     }
 
     private func scheduleLockPass() {
         guard automaticScheduling else { return }
+        scheduleWakeCheck()
         scheduledLockTask?.cancel()
         scheduledLockTask = nil
         guard !isSleeping, !isReconciling, !isApplying else { return }
         let delays = displays.compactMap { display -> TimeInterval? in
             guard let target = targets[display.id], !retry(for: display.id).isPaused,
+                  !isSuspended(display.id),
                   backend.identity(display.cgDirectDisplayID) == display.id,
                   case .restore = ModeLockDecision.evaluate(target: target, connection: display.liveConnection) else { return nil }
             return max(DisplayMutationGate.isBusy ? 1 : 0.25, retry(for: display.id).delay(at: backend.now()))
@@ -306,21 +413,48 @@ final class DisplayGuard: ObservableObject {
         }
     }
 
+    private func scheduleWakeCheck() {
+        guard automaticScheduling, wakeCheckTask == nil,
+              wakeState.shouldCheckAgain(at: backend.now())
+                || displayWakeStates.values.contains(where: { $0.shouldCheckAgain(at: backend.now()) }) else { return }
+        // Separate from reconfiguration debounce: repeated notifications must
+        // not postpone every wake check until the driver's final event.
+        wakeCheckTask = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 1_000_000_000) }
+            catch { return }
+            guard !Task.isCancelled, let self else { return }
+            self.wakeCheckTask = nil
+            self.reload()
+        }
+    }
+
     private func observeDisplayNotifications() {
         observe(NSApplication.didChangeScreenParametersNotification, on: .default, delay: 0.5)
         let center = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification] {
             let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.setSleeping(true) }
+                MainActor.assumeIsolated { self?.setSleeping(true, source: name.rawValue) }
             }
             observers.append((center, token))
         }
         for name in [NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification] {
             let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.setSleeping(false) }
+                MainActor.assumeIsolated { self?.setSleeping(false, source: name.rawValue) }
             }
             observers.append((center, token))
         }
+        let sessionToken = center.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification,
+                                              object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.sessionBecameActive() }
+        }
+        observers.append((center, sessionToken))
+        let inactiveToken = center.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification,
+                                               object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.setSleeping(true, source: NSWorkspace.sessionDidResignActiveNotification.rawValue)
+            }
+        }
+        observers.append((center, inactiveToken))
     }
 
     private func observe(_ name: Notification.Name, on center: NotificationCenter, delay: TimeInterval) {
@@ -352,6 +486,7 @@ final class DisplayGuard: ObservableObject {
     deinit {
         refreshTask?.cancel()
         scheduledLockTask?.cancel()
+        wakeCheckTask?.cancel()
         pollTimer?.invalidate()
         for (center, token) in observers { center.removeObserver(token) }
     }

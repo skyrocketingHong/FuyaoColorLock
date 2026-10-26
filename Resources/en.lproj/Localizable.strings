@@ -145,3 +145,4 @@
 "Other modes (view only)" = "Other modes (view only)";
 "Keep this mode after wake or reconnection." = "Keep this mode after wake or reconnection.";
 "Retry" = "Retry";
+"Waiting for the display and user session to become ready." = "Waiting for the display and user session to become ready.";

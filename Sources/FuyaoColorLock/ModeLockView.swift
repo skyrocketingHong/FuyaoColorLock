@@ -88,6 +88,8 @@ struct ModeLockView: View {
             return "Automatic attempts are paused. Check the connection, then retry or turn off the lock."
         case .sleeping:
             return "The display is sleeping. Restoration resumes after wake."
+        case .waking:
+            return "Waiting for the display and user session to become ready."
         }
     }
 }

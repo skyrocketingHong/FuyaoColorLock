@@ -48,7 +48,7 @@ struct ModeLockTarget: Codable, Hashable {
 }
 
 enum ModeLockPhase: Equatable {
-    case off, matching, restoring, waitingForDisplay, unavailable, incompatible, retryScheduled, paused, sleeping
+    case off, matching, restoring, waitingForDisplay, unavailable, incompatible, retryScheduled, paused, sleeping, waking
 }
 
 struct ModeLockState: Equatable {
@@ -78,23 +78,28 @@ enum ModeLockDecision: Equatable {
 /// Ordinary refreshes do not reset failure budgets. Confirmed recovery clears
 /// consecutive failures; the independent rate budget still limits flapping.
 struct ModeLockRetry {
+    enum PauseReason { case manualChange, automaticFailure, rateLimit }
     private(set) var failures = 0
     private(set) var nextAttemptAt: Date?
-    private(set) var isPaused = false
+    private(set) var pauseReason: PauseReason?
+    var isPaused: Bool { pauseReason != nil }
     private var attempts: [Date] = []
 
     mutating func allowsAttempt(at now: Date) -> Bool {
         attempts.removeAll { now.timeIntervalSince($0) >= 60 }
-        guard attempts.count < 3 else { pause(); return false }
+        guard attempts.count < 3 else { pause(reason: .rateLimit); return false }
         return true
     }
 
     mutating func recordAttempt(at now: Date) { attempts.append(now) }
+    mutating func deferReadinessCheck(at now: Date) {
+        nextAttemptAt = max(nextAttemptAt ?? now, now.addingTimeInterval(1))
+    }
 
     mutating func failed(at now: Date) {
         failures += 1
         if failures >= 3 {
-            isPaused = true
+            pauseReason = .automaticFailure
             nextAttemptAt = nil
         } else {
             nextAttemptAt = now.addingTimeInterval(failures == 1 ? 5 : 15)
@@ -102,7 +107,12 @@ struct ModeLockRetry {
     }
 
     mutating func confirmed() { failures = 0; nextAttemptAt = nil }
-    mutating func pause() { isPaused = true; nextAttemptAt = nil }
+    mutating func pause(reason: PauseReason = .manualChange) { pauseReason = reason; nextAttemptAt = nil }
+
+    mutating func resumeAfterWake() {
+        guard pauseReason != .manualChange else { return }
+        self = ModeLockRetry()
+    }
 
     func delay(at now: Date) -> TimeInterval {
         max(0, nextAttemptAt?.timeIntervalSince(now) ?? 0)

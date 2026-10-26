@@ -145,3 +145,4 @@
 "Other modes (view only)" = "其他模式（仅查看）";
 "Keep this mode after wake or reconnection." = "唤醒或重新连接后保持此模式。";
 "Retry" = "重试";
+"Waiting for the display and user session to become ready." = "等待显示器和用户会话恢复就绪。";
