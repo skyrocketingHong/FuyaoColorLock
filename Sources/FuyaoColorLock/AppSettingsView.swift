@@ -4,6 +4,7 @@ import SwiftUI
 
 struct AppSettingsView: View {
     let showAbout: () -> Void
+    let isBusy: Bool
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var needsApproval = SMAppService.mainApp.status == .requiresApproval
     @State private var loginError: String?
@@ -18,7 +19,7 @@ struct AppSettingsView: View {
                         needsApproval: needsApproval
                     )
                     Divider()
-                    AboutInformation(showAbout: showAbout)
+                    AboutInformation(showAbout: showAbout, isBusy: isBusy)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -82,6 +83,7 @@ private struct LoginItemSettingsRow: View {
 
 private struct AboutInformation: View {
     let showAbout: () -> Void
+    let isBusy: Bool
 
     var body: some View {
         PanelControlRow {
@@ -94,11 +96,15 @@ private struct AboutInformation: View {
             }
             .fixedSize(horizontal: false, vertical: true)
         } control: {
-            Button(action: showAbout) {
-                PanelActionLabel("About…")
+            HStack(spacing: PanelMetrics.rowSpacing) {
+                Button(action: showAbout) { PanelActionLabel("About…") }
+                    .modifier(PanelActionStyle())
+                    .accessibilityLabel("About Fuyao Color Lock…")
+                Button { NSApp.terminate(nil) } label: { PanelActionLabel("Quit", minimumWidth: 44) }
+                    .modifier(PanelActionStyle())
+                    .keyboardShortcut("q")
+                    .disabled(isBusy)
             }
-            .modifier(PanelActionStyle())
-            .accessibilityLabel("About Fuyao Color Lock…")
         }
     }
 

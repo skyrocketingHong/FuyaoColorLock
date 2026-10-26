@@ -9,17 +9,13 @@ struct PanelContent: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            PanelHeader(isApplying: monitor.isApplying, refresh: monitor.reload)
-
-            if !monitor.displays.isEmpty {
-                DisplaySelectionRow(
-                    choices: monitor.displays.map { DisplayMenuPicker.Choice(id: $0.id, name: $0.name) },
-                    selection: selection,
-                    selectedName: selectedDisplay?.name ?? ""
-                )
-                .padding(.horizontal, PanelMetrics.contentInset)
-                .padding(.bottom, 12)
-            }
+            PanelHeader(
+                displayName: selectedDisplay?.name,
+                choices: monitor.displays.map { DisplayMenuPicker.Choice(id: $0.id, name: $0.name) },
+                selection: selection,
+                isApplying: monitor.isApplying,
+                refresh: monitor.reload
+            )
 
             ScrollViewReader { proxy in
                 ScrollView {
@@ -27,24 +23,21 @@ struct PanelContent: View {
                         Color.clear.frame(height: 0).id("display-content-start")
 
                         if monitor.refreshFailed {
-                            Label("Display information could not be refreshed. Try again.", systemImage: "exclamationmark.triangle")
+                            Label("Couldn't refresh. Try again.", systemImage: "exclamationmark.triangle")
                                 .font(.callout)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
 
                         if let display = selectedDisplay {
                             ColorModeSettingsView(display: display, monitor: monitor, overrides: overrides)
-
-                            VStack(alignment: .leading, spacing: 10) {
-                                PanelSectionTitle(title: "Installation configuration")
-                                EDIDSettingsView(display: display, manager: overrides, lastRefreshAt: monitor.lastRefreshAt)
-                                    .disabled(monitor.isApplying)
-                            }
-                        } else {
-                            EmptyDisplayInformation()
+                            EDIDSettingsView(display: display, manager: overrides, lastRefreshAt: monitor.lastRefreshAt)
+                                .disabled(monitor.isApplying)
+                        } else if !monitor.refreshFailed {
+                            EmptyDisplayInformation(issue: presentation.selectionIssue,
+                                                    hasOtherDisplays: !monitor.displays.isEmpty)
                         }
 
-                        AppSettingsView(showAbout: showAbout)
+                        AppSettingsView(showAbout: showAbout, isBusy: monitor.isApplying || overrides.isBusy)
                     }
                     .padding(.horizontal, PanelMetrics.contentInset)
                     .padding(.bottom, PanelMetrics.contentInset)
@@ -56,9 +49,6 @@ struct PanelContent: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            Divider()
-            PanelFooter(lastRefreshAt: monitor.lastRefreshAt, isBusy: monitor.isApplying || overrides.isBusy)
         }
         .frame(width: presentation.size.width, height: presentation.size.height)
         .clipped()
@@ -67,75 +57,82 @@ struct PanelContent: View {
     }
 
     private var selectedDisplay: PhysicalDisplay? {
-        monitor.displays.first { $0.id == presentation.selectedDisplayID } ?? monitor.displays.first
+        monitor.displays.first { $0.id == presentation.selectedDisplayID }
     }
 
-    private var selection: Binding<String> {
+    private var selection: Binding<String?> {
         Binding(
-            get: { selectedDisplay?.id ?? "" },
-            set: { presentation.selectedDisplayID = $0 }
+            get: { presentation.selectedDisplayID },
+            set: { presentation.selectDisplay($0, displays: monitor.displays) }
         )
     }
 
     private func reconcileSelection() {
-        guard !monitor.displays.contains(where: { $0.id == presentation.selectedDisplayID }) else { return }
-        presentation.selectedDisplayID = monitor.displays.first?.id
+        presentation.reconcile(displays: monitor.displays)
     }
 }
-
 private struct PanelHeader: View {
+    let displayName: String?
+    let choices: [DisplayMenuPicker.Choice]
+    @Binding var selection: String?
     let isApplying: Bool
     let refresh: () -> Void
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Text("Fuyao Color Lock").font(.headline)
-            Spacer(minLength: 0)
-            Button(action: refresh) {
-                Label("Refresh", systemImage: "arrow.clockwise")
-                    .labelStyle(.iconOnly)
-                    .frame(minWidth: 16, minHeight: 16)
+        PanelControlRow(minimumLabelWidth: 160) {
+            if let displayName {
+                Text(displayName)
+                    .font(.headline)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("Displays").font(.headline)
             }
-            .modifier(PanelActionStyle())
-            .keyboardShortcut("r")
-            .disabled(isApplying)
-            .help("Refresh display information and check enabled mode locks. ⌘R")
+        } control: {
+            HStack(spacing: PanelMetrics.rowSpacing) {
+                if choices.count > 1 || (selection == nil && !choices.isEmpty) {
+                    DisplayMenuPicker(choices: choices, selection: $selection)
+                }
+                Button(action: refresh) {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                        .labelStyle(.iconOnly)
+                        .frame(minWidth: 16, minHeight: 16)
+                }
+                .modifier(PanelActionStyle())
+                .keyboardShortcut("r")
+                .disabled(isApplying)
+                .help("Refresh display information and check enabled mode locks. ⌘R")
+            }
         }
         .padding(.horizontal, PanelMetrics.contentInset)
         .padding(.vertical, 12)
     }
 }
 
-private struct DisplaySelectionRow: View {
-    let choices: [DisplayMenuPicker.Choice]
-    @Binding var selection: String
-    let selectedName: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            DisplayMenuPicker(choices: choices, selection: $selection)
-                .frame(maxWidth: .infinity)
-                .frame(minHeight: PanelMetrics.controlMinHeight)
-            Text(selectedName)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-}
-
 private struct EmptyDisplayInformation: View {
+    let issue: DisplaySelectionIssue?
+    let hasOtherDisplays: Bool
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Label("No external display", systemImage: "display")
+        VStack(alignment: .leading, spacing: PanelMetrics.rowSpacing) {
+            Label(title, systemImage: "display")
                 .font(.headline)
-            Text("Connect or wake an external display, then refresh. Some displays do not expose a connection mode table to macOS.")
+            Text(hasOtherDisplays ? LocalizedStringKey("Choose a display from Other displays.")
+                                  : LocalizedStringKey("Connect an external display, then refresh."))
+                .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.vertical, 16)
+        .padding(.vertical, 12)
+    }
+
+    private var title: LocalizedStringKey {
+        switch issue {
+        case .unknownScreen: return "Couldn't identify this screen."
+        case .unavailableDisplay: return "Display unavailable."
+        case .ambiguousScreen: return "Choose a display for this screen."
+        case nil: return "No external display"
+        }
     }
 }
 
@@ -146,8 +143,7 @@ private struct ColorModeSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            PanelSectionTitle(title: "Color modes")
-            InformationGroup("Live connection mode") {
+            InformationGroup("Color mode") {
                 LiveModeInformation(connection: display.liveConnection, applyResult: monitor.applyResults[display.id])
                 Divider()
                 ModeLockView(
@@ -169,35 +165,9 @@ private struct ColorModeSettingsView: View {
                 )
             }
 
-            DisplayDetailsView(display: display, preference: monitor.preference(for: display)) {
+            DisplayDetailsView(display: display, preference: monitor.preference(for: display), lastRefreshAt: monitor.lastRefreshAt) {
                 monitor.clearTarget(for: display)
             }
         }
-    }
-}
-
-private struct PanelFooter: View {
-    let lastRefreshAt: Date?
-    let isBusy: Bool
-
-    var body: some View {
-        HStack(spacing: 12) {
-            if let lastRefreshAt {
-                HStack(spacing: 4) {
-                    Text("Last read")
-                    Text(lastRefreshAt, format: .dateTime.hour().minute().second())
-                        .monospacedDigit()
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 0)
-            Button { NSApp.terminate(nil) } label: { PanelActionLabel("Quit", minimumWidth: 44) }
-                .modifier(PanelActionStyle())
-                .keyboardShortcut("q")
-                .disabled(isBusy)
-        }
-        .padding(.horizontal, PanelMetrics.contentInset)
-        .padding(.vertical, 12)
     }
 }

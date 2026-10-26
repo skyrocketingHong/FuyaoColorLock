@@ -2,13 +2,15 @@
 
 [简体中文](VALIDATION_ZH.md)
 
-Build target: Apple Silicon, macOS 13.0+, version 1.0 (5), built with macOS SDK 27.2 and Swift 6.4.2.
+Build target: Apple Silicon, macOS 13.0+, version 1.0 (6), built with macOS SDK 27.2 and Swift 6.4.2.
 
 ## Completed checks
 
-Build 5 changes wake recovery. The affected lock regression suite was rerun; unchanged catalog, EDID and layout evidence below is retained from its last relevant verification.
+Build 6 changes presentation and source-screen selection. The new selection suite passed; unchanged display, lock and EDID evidence below is retained from its last relevant verification.
 
-- UI source review checked action-column alignment, native button label sizing, long-text wrapping, narrow-width fallbacks and preservation of disabled states. An in-memory AppKit check confirmed that two identically named displays retain separate IDs and can be selected independently. No window or menu was shown for that check.
+- 8 display-selection groups cover selecting on every opening, manual choice retention, disconnection without a substitute, delayed catalog updates, reused CG IDs, ambiguous and unsupported screens, negative origins, menu-bar top edges, vertically adjoining displays and switching an open panel to another screen.
+- A read-only AppKit/catalog probe found 3 screens with unique system IDs and 3 exact catalog matches. No names, IDs or coordinates were printed. This does not replace testing actual clicks on replicated menu bars.
+- UI source review checked shortened copy, single ownership of current-mode and operation feedback, secondary display navigation, long-text wrapping and preserved disabled states. Same-name menu choices remain keyed by stable identity.
 - 8 display-model regression groups: missing timing, incomplete and conflicting records, mode identity, legacy preferences and unique EDID matching.
 - 5 native connection-mode groups: full-width IDs, exact timing compatibility, fresh identity and target checks, repeated readback and mutation exclusion.
 - 24 fake-backend mode-lock groups: default opt-out and persistence, drift and readback, fresh IDs after reconnection, incompatible or ambiguous modes, disabling during readback, manual target changes, failure and rate limits, sleep, reused IDs, shared-gate contention and multiple displays; plus missed or duplicate wake hints, readiness deadlines, late driver modes, partial display wake, unavailable or unknown sessions, paused-recovery classification and unsubmitted requests. These tests use isolated preferences and never call the native setter.
@@ -28,19 +30,20 @@ Build 5 changes wake recovery. The affected lock regression suite was rerun; unc
 - The UI follows the EC25 native panel reference: fixed canvas, internal scrolling, system groups and controls, selectable technical values. No screenshot or appearance acceptance is claimed.
 - Supported actions have wired handlers; unsupported modes have no application action. Loading, unavailable, conflicting and unconfirmed states are explicit.
 - Panel order is color mode switching and lock, installation configuration, then application settings and About. Newer systems use native glass controls and scroll-edge effects; macOS 27 uses item-based alerts. About opens the standard system panel. Older supported systems retain fallback controls.
-- Current mode and lock share one group. Compatible mode rows display format and parameters without repeating their common timing. Controls use a shared regular size and action column; installation buttons share their available width, and application settings use one group. Full display names remain selectable below the native selector.
+- The display name appears once in the header. The current mode is omitted from the alternative list; stable lock states omit explanatory paragraphs. Export, change counts and file location share configuration details; the read timestamp is in display details, and Quit remains available in application settings with its keyboard shortcut.
+- Screen selection uses public AppKit IDs and the captured mouse screen. Right-click Open retains its source on the menu item; keyboard/window fallback does not override a known mouse location. Mirroring or an unavailable source does not silently select another target.
 - Wake recovery has a separate bounded read-only check loop and per-display readiness gates. Main-queue sleep, wake and session callbacks enter the main actor synchronously. Unknown session readings do not create a new recovery cycle; automatic pauses and unconfirmed manual-change pauses remain distinct.
 
 ## Manual acceptance
 
-1. Open the built app and switch displays with different mode counts. The panel frame should stay fixed, with content scrolling inside it.
-2. Reopen from menu bars on screens with different scaling and positions. Check small-screen clamping, long names, duplicate display names, both languages, appearance and keyboard navigation. In a narrow panel, verify that controls move below their labels and EDID buttons form a vertical group without clipping.
+1. Open the menu-bar icon on each display and check the header and parameters. With A's panel open, click B's icon and check that B is shown in the same action. Right-click Open must follow the original right-click screen. The outer frame remains fixed, with internal scrolling.
+2. Choose another display manually, wait for a refresh and verify the choice stays. Close and reopen on a different screen to check automatic selection resumes. Check disconnection, mirroring, long or duplicate names, small-screen clamping, both languages, appearance and keyboard navigation; no unrelated display should become an implicit target.
 3. Confirm unsupported modes remain readable and cannot be applied. Apply a compatible native mode, check the pending state and compare the resulting live format with the request. Confirmation requires two matching reads; timeout must not report success. Saved WindowServer records must not appear as live measurements.
 4. Enable **Lock color mode** only after choosing the intended current mode. Lock the Mac, wait for the display to power down, then wake and unlock it. Allow the readiness state to finish and compare the saved target, lock status and live mode. Also check a longer screen-off interval and a multi-display case where one screen remains asleep. Disable the switch to stop future restorations. Incompatible timing changes must remain waiting, and a failed manual mode change must not immediately restore the old target.
 5. Export an EDID override first. Check the displayed change summary and file path. Installation or restoration requires explicit confirmation and macOS administrator authorization. Turn the mode lock off when checking the effect of the EDID override alone.
 6. After installation or restoration, reconnect the display and inspect actual output. File installation is not evidence of RGB Full Range output. Check the application settings and standard About panel at the end of the popover.
 
-The previous running app was gracefully restarted into version 1.0 (5), and launch completion was confirmed. Existing mode-lock targets were not edited. No BetterDisplay application, administrator installer, screen-lock/sleep operation or manual display mode change was invoked by these checks; previously enabled locks use the updated recovery flow. No display EEPROM was written. Visual, keyboard, physical lock-screen/wake restoration, administrator and HDMI signal acceptance remain pending.
+The previous running app was gracefully restarted into version 1.0 (6), and launch completion was confirmed. Existing mode-lock targets and the recovery backend were not changed. No menu-bar click, screenshot, administrator installation, screen-lock/sleep operation or manual display mode change was invoked by these checks. Actual multi-screen opening, visual, keyboard, physical wake restoration, administrator and HDMI signal acceptance remain pending.
 
 ## Reproduce checks
 

@@ -7,38 +7,26 @@ struct EDIDSettingsView: View {
     @State private var status: EDIDOverrideStatus?
 
     var body: some View {
-        InformationGroup("Prefer RGB with EDID override") {
+        InformationGroup("Installation configuration") {
             if let status {
+                EDIDActionRow(display: display, manager: manager, status: status)
+                    .disabled(manager.isBusy)
                 EDIDInstallationStatus(status: status)
-
-                if let patch = status.patch, patch.hasChanges, !status.installed {
-                    EDIDChangePreview(patch: patch)
-                }
-
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: PanelMetrics.rowSpacing) {
-                        EDIDActionButtons(display: display, manager: manager, status: status)
-                    }
-                    VStack(spacing: PanelMetrics.rowSpacing) {
-                        EDIDActionButtons(display: display, manager: manager, status: status)
-                    }
-                }
-                .disabled(manager.isBusy)
             }
 
-            Text("Full Range is not guaranteed. Installing or restoring requires administrator approval.")
+            Text("Full Range is not guaranteed. Install and restore require administrator approval.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            EDIDDetails(path: status?.destinationPath)
+            EDIDDetails(status: status, isBusy: manager.isBusy) {
+                manager.exportOverride(for: display)
+            }
 
             if manager.isBusy {
                 HStack(spacing: PanelMetrics.rowSpacing) {
                     ProgressView().controlSize(.small)
-                    Text("Working on the override…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Text("Updating configuration…").font(.callout)
                 }
             }
 
@@ -65,66 +53,80 @@ struct EDIDSettingsView: View {
     }
 }
 
-private struct EDIDChangePreview: View {
-    let patch: EDIDPatch
+private struct EDIDActionRow: View {
+    let display: PhysicalDisplay
+    @ObservedObject var manager: EDIDOverrideManager
+    let status: EDIDOverrideStatus
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 16) {
-                EDIDChangeCount(title: "CTA flag groups", count: patch.clearedCTAFlags)
-                EDIDChangeCount(title: "4:2:0 blocks", count: patch.removed420Blocks)
-            }
-            VStack(alignment: .leading, spacing: 4) {
-                EDIDChangeCount(title: "CTA flag groups", count: patch.clearedCTAFlags)
-                EDIDChangeCount(title: "4:2:0 blocks", count: patch.removed420Blocks)
-            }
-        }
-        .font(.caption)
-        .foregroundStyle(.secondary)
-        .accessibilityElement(children: .combine)
-    }
-}
-
-private struct EDIDChangeCount: View {
-    let title: LocalizedStringKey
-    let count: Int
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(title)
+        PanelControlRow(minimumLabelWidth: 120) {
+            Text("Prefer RGB")
                 .fixedSize(horizontal: false, vertical: true)
-            Text(count, format: .number)
-                .monospacedDigit()
-                .foregroundStyle(.primary)
+        } control: {
+            HStack(spacing: PanelMetrics.rowSpacing) {
+                if status.installed || status.canRestore {
+                    Button {
+                        manager.restore(for: display)
+                    } label: {
+                        PanelActionLabel("Restore…")
+                    }
+                    .modifier(PanelActionStyle())
+                    .disabled(!status.canRestore)
+                    .help("Restore the original override backed up by this app.")
+                } else {
+                    Button {
+                        manager.install(for: display)
+                    } label: {
+                        PanelActionLabel("Install…")
+                    }
+                    .modifier(PanelActionStyle())
+                    .disabled(status.patch?.hasChanges != true || status.hasConflictingInstall)
+                    .help("Install an RGB preference override with administrator approval.")
+                }
+            }
         }
     }
 }
 
 private struct EDIDDetails: View {
-    let path: String?
+    let status: EDIDOverrideStatus?
+    let isBusy: Bool
+    let export: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: PanelMetrics.rowSpacing) {
-            DisclosureGroup("Override details") {
+        DisclosureGroup("Configuration details") {
+            VStack(alignment: .leading, spacing: PanelMetrics.rowSpacing) {
                 Text("Removes CTA-advertised YCbCr support. Reconnect the display after installation or restoration.")
-                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 4)
-            }
-            if let path {
-                DisclosureGroup("File location") {
+                if let patch = status?.patch, patch.hasChanges, status?.installed != true {
+                    LabeledContent("CTA flag groups") {
+                        Text(patch.clearedCTAFlags, format: .number).monospacedDigit()
+                    }
+                    LabeledContent("4:2:0 blocks") {
+                        Text(patch.removed420Blocks, format: .number).monospacedDigit()
+                    }
+                }
+                if let path = status?.destinationPath {
+                    Text("File location").foregroundStyle(.secondary)
                     Text(path)
                         .font(.caption.monospaced())
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.top, 4)
+                }
+                HStack {
+                    Spacer(minLength: 0)
+                    Button(action: export) { PanelActionLabel("Export…") }
+                        .modifier(PanelActionStyle())
+                        .disabled(isBusy || status?.patch?.hasChanges != true)
+                        .help("Save the override file without installing it.")
                 }
             }
+            .font(.caption)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 4)
         }
-        .font(.caption)
+        .font(.callout)
     }
 }
 
@@ -132,74 +134,21 @@ private struct EDIDInstallationStatus: View {
     let status: EDIDOverrideStatus
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        Group {
             if status.hasConflictingInstall {
-                Label("An existing override needs review", systemImage: "exclamationmark.triangle")
-                    .font(.callout)
-                Text("The override or its backup record needs review before installation or restoration.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Label("Review the installed file and backup before retrying.", systemImage: "exclamationmark.triangle")
             } else if status.installed {
-                Label("Override file installed", systemImage: "doc.badge.gearshape")
-                    .font(.callout.weight(.medium))
-                Text("Reconnect the display to load this configuration.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Label("Installed. Reconnect the display to load it.", systemImage: "doc.badge.gearshape")
             } else if status.canRestore {
-                Text("A previous operation needs restoration. Restore the backup state before installing again.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                Text("Restore the previous configuration before reinstalling.")
             } else if let reason = status.unavailableReason {
                 Text(reason)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
             } else if let patch = status.patch, !patch.hasChanges {
-                Text("No removable YCbCr advertisement was found. An override would not change this EDID.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("Ready to export or install.")
-                    .font(.callout)
+                Text("No EDID changes are available.")
             }
         }
+        .font(.callout)
+        .foregroundStyle(.secondary)
         .fixedSize(horizontal: false, vertical: true)
-    }
-}
-
-private struct EDIDActionButtons: View {
-    let display: PhysicalDisplay
-    @ObservedObject var manager: EDIDOverrideManager
-    let status: EDIDOverrideStatus
-
-    var body: some View {
-        Group {
-            Button {
-                manager.exportOverride(for: display)
-            } label: {
-                PanelActionLabel("Export…")
-                    .frame(maxWidth: .infinity)
-            }
-            .disabled(status.patch?.hasChanges != true)
-            .help("Save the override file without installing it.")
-
-            Button {
-                manager.install(for: display)
-            } label: {
-                PanelActionLabel("Install…")
-                    .frame(maxWidth: .infinity)
-            }
-            .disabled(status.patch?.hasChanges != true || status.installed || status.canRestore || status.hasConflictingInstall)
-            .help("Install an RGB preference override with administrator approval.")
-
-            Button {
-                manager.restore(for: display)
-            } label: {
-                PanelActionLabel("Restore…")
-                    .frame(maxWidth: .infinity)
-            }
-            .disabled(!status.canRestore)
-            .help("Restore the original override backed up by this app.")
-        }
-        .modifier(PanelActionStyle())
     }
 }

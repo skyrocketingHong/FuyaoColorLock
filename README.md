@@ -22,6 +22,7 @@ Fuyao Color Lock reads live system connection modes and can request a supported 
 ## Features
 
 - A native popover with a fixed canvas and internal scrolling. Switching displays does not resize the panel to fit a different number of modes.
+- Opening the menu-bar icon on an external display automatically shows that display. A secondary menu lets you inspect another display without changing any mode.
 - Separate display timing, macOS records and driver capabilities. Missing and conflicting information stays explicit.
 - Explicit connection-format changes using `CADisplay`, with native 64-bit mode IDs and readback confirmation. No BetterDisplay installation is required.
 - Per-display mode locking after explicit opt-in. Display changes, wake and periodic checks can restore the saved format while preserving the current timing; unlocked displays remain read-only during refresh.
@@ -39,15 +40,19 @@ scripts/build-app.sh
 open build/FuyaoColorLock.app
 ```
 
-The script uses the selected SDK through `xcrun` (validated with macOS 27.2 and Swift 6.4.2), packages an optimized arm64 app with localization resources and verifies its ad hoc signature before replacing the previous build. Native macOS 26 and 27 controls are used where available, with macOS 13 fallbacks. The app is not notarized. Build 5 retains marketing version 1.0.
+The script uses the selected SDK through `xcrun` (validated with macOS 27.2 and Swift 6.4.2), packages an optimized arm64 app with localization resources and verifies its ad hoc signature before replacing the previous build. Native macOS 26 and 27 controls are used where available, with macOS 13 fallbacks. The app is not notarized. Build 6 retains marketing version 1.0.
 
 ## Reading the panel
 
+Click the app's menu-bar icon on the display you want to inspect. Each opening selects that screen by its system display ID. To inspect another display, use **Other displays** (the two-display icon at the top right). A manual selection stays in place while the panel is open; the next opening follows its source screen again.
+
+If the source cannot be matched uniquely, including mirrored or unsupported built-in screens, the panel asks for a selection instead of showing an unrelated display. Choosing a display only changes the information being shown.
+
 | Information | Meaning |
 | --- | --- |
-| Live connection | The current native system mode, including timing, format, range, bit depth and reported gamut. |
+| Color mode | The current native system mode, including timing, format, range, bit depth and reported gamut. |
 | macOS record | Saved WindowServer fields. Records may be absent, old or conflicting; they are not live measurements. |
-| Mode options | Native modes compatible with the current timing offer Apply when the setter is available. Other timings and driver-only entries remain view-only. |
+| Switch mode | Other compatible native formats offer Apply when the setter is available. The current format is shown once in the summary; other timings and driver-only entries remain view-only. |
 | Previous target | An unresolved numeric ID saved by an older version. Driver IDs can change; it is not converted into a guessed color format. |
 | Refresh | Reads the current state and checks enabled locks. Only an explicitly enabled lock may restore its saved mode. |
 
@@ -58,19 +63,19 @@ Choose **Apply** beside a compatible mode. A brief blank screen can occur during
 The panel is ordered **color mode switching and lock → installation configuration → app settings and About**. The lock switch is in the first section, alongside the live connection information and mode choices.
 
 1. Apply the desired compatible mode and check that system readback confirms it.
-2. Enable **Lock color mode**. Expand **Locked target** to see the format and timing being retained. Each display has an independent lock, disabled by default; old numeric target preferences do not silently enable it.
+2. Enable **Lock color mode**. When the current mode matches, the summary already shows the locked target. During a mismatch or waiting state, expand **Locked target** to inspect it. Each display has an independent lock, disabled by default; old numeric target preferences do not silently enable it.
 3. Keep the app running. After wake, reconnection or detected drift, it looks for a unique current native mode matching the saved parameters, restores it when compatible and verifies the result. Changing driver mode IDs after reconnection does not change the saved target.
 4. A confirmed manual mode change while locked updates the locked target. To stop automatic restoration, turn off the switch; this does not itself change the current mode. Use **Launch at Login** in **Application settings** if the app should resume monitoring after login.
 
 A different resolution, refresh rate, HDR or VRR state suspends restoration rather than forcing the old timing. Missing data, disconnected displays and sleeping screens remain waiting or unavailable. Failed restoration retries after 5 and 15 seconds, then pauses after three consecutive failures; a continuous recovery cycle also limits automatic setting requests to three per 60 seconds. Confirmed recovery from sleep or session unavailability starts a new bounded automatic cycle. A pause caused by an unconfirmed manual change is preserved until you retry or change the lock. Inspect the live mode before choosing **Retry** in the lock section. An enabled switch means the preference is active, while the adjacent status explains whether the system mode actually matches.
 
-After the screen turns back on, **Waiting for the display and user session to become ready** is a temporary readiness state. The app checks actual display power and session availability instead of relying on a single wake notification, then revisits driver readiness for a bounded period. A missed or out-of-order notification must not leave the lock permanently marked as sleeping. Unknown readings do not authorize a write, and the saved timing constraints are unchanged.
+After the screen turns back on, **Waiting for the display and session…** is a temporary readiness state. The app checks actual display power and session availability instead of relying on a single wake notification, then revisits driver readiness for a bounded period. A missed or out-of-order notification must not leave the lock permanently marked as sleeping. Unknown readings do not authorize a write, and the saved timing constraints are unchanged.
 
 ## Optional EDID override
 
-In the panel, select a display and open **Prefer RGB with EDID override**:
+Below the mode controls, **Installation configuration** contains the **Prefer RGB** action:
 
-- **Export** saves a plist without changing the system.
+- **Export**, inside **Configuration details**, saves a plist without changing the system. The same disclosure contains change counts and the file location.
 - **Install** previews the change, asks for confirmation and uses the macOS administrator prompt. It preserves existing plist fields and backs up the original file before installing the modified EDID.
 - **Restore** restores the original file byte-for-byte, or removes the app's override if none existed before. External changes cause restoration to stop rather than overwrite them.
 
@@ -92,10 +97,10 @@ The patch clears CTA YCbCr 4:4:4 and 4:2:2 flags and removes CTA YCbCr 4:2:0 vid
 
 ### Check the live mode after applying a format
 
-1. Select the correct display and note its **Live connection mode** before changing anything, so you can select the previous compatible mode again if needed.
-2. In **Connection mode options**, apply a listed RGB Full mode. Check `RGB Full` on the format line and the bit depth, HDR and gamut below it, for example `8-bit · SDR · sRGB`. `sRGB` alone does not establish the encoding or range. Compatible rows share the timing shown in the live summary; resolution, refresh rate, HDR and VRR state should remain unchanged.
-3. Allow several seconds for **Latest mode change** to show **System read-back matched the requested mode after the change.** The app requires two complete matching reads 0.5 seconds apart, with a six-second verification window. **The selected mode has not been confirmed** is not a success result.
-4. Click the **Refresh** arrow icon at the top right or press **⌘R**. Check that **Last read** advances and **Live connection mode** still shows the requested format. If it shows `YCbCr` or `RGB Limited`, the current system mode does not meet the RGB Full target. If the live mode is unavailable, the result remains unverified.
+1. Open the menu-bar icon on the intended display and check the display name at the top. Note the **Color mode** summary before changing anything, so you can select the previous compatible mode again if needed.
+2. In **Switch mode**, apply a listed RGB Full format. Check `RGB Full` on the format line and the bit depth, HDR and gamut below it, for example `8-bit · SDR · sRGB`. `sRGB` alone does not establish the encoding or range. Compatible rows share the timing shown in the summary; resolution, refresh rate, HDR and VRR state should remain unchanged.
+3. Allow several seconds for **Confirmed by system read-back.** The app requires two complete matching reads 0.5 seconds apart, with a six-second verification window. **Not confirmed** is not a success result.
+4. Click the **Refresh** arrow icon at the top right or press **⌘R**. Expand **Display details** to check that **Last read** advances, and check that **Color mode** still shows the requested format. If it shows `YCbCr` or `RGB Limited`, the current system mode does not meet the RGB Full target. If the live mode is unavailable, the result remains unverified.
 5. To check whether the result survives renegotiation, repeat the read after sleep/wake or after reconnecting the HDMI cable. For the lock-screen case, wait until the screen actually powers down, then wake and unlock it; allow the readiness state to finish. With the lock off, this checks what macOS retained. With the lock on, also check **Locked target** and the lock status: restoration must finish with the live mode matching the target. Merely staying in the same mode does not exercise the restoration path. Turn off the lock when you want to inspect negotiation without automatic correction.
 
 If wake restoration remains pending, the following read-only command shows the app's recent lifecycle and recovery events. It records state changes and outcomes without display names, UUIDs or EDID contents:
@@ -124,7 +129,7 @@ The driver mode list and **macOS record** are reference data, not the current-mo
 
 ### Check an EDID installation separately
 
-1. In **Prefer RGB with EDID override**, check for **Override file installed**, then expand **File location** and copy the actual path. Do not guess the vendor or product IDs.
+1. In **Installation configuration**, check for **Installed. Reconnect the display to load it.** Expand **Configuration details** and copy **File location**. Do not guess the vendor or product IDs.
 2. Optionally inspect that file in Finder using **Go > Go to Folder…** (**⇧⌘G**), or validate it in Terminal. Replace the quoted placeholder with the copied path:
 
    ```bash

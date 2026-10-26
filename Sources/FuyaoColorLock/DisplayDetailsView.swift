@@ -3,11 +3,18 @@ import SwiftUI
 struct DisplayDetailsView: View {
     let display: PhysicalDisplay
     let preference: DisplayPreference
+    let lastRefreshAt: Date?
     let clearTarget: () -> Void
 
     var body: some View {
         DisclosureGroup("Display details") {
             VStack(alignment: .leading, spacing: 14) {
+                if let lastRefreshAt {
+                    LabeledContent("Last read") {
+                        Text(lastRefreshAt, format: .dateTime.hour().minute().second())
+                            .monospacedDigit()
+                    }
+                }
                 InformationGroup("Saved macOS record") {
                     RecordedModeInformation(state: display.recordedLinkState)
                 }
@@ -21,7 +28,7 @@ struct DisplayDetailsView: View {
                     )
                 }
                 ReportedTimingInformation(timings: display.timings, currentTimingID: display.currentTimingID)
-                Text("Connection formats are separate from ICC color profiles. System read-back does not measure the display's physical color output.")
+                Text("System read-back is not a measurement of the panel's color output.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -43,22 +50,14 @@ private struct RecordedModeInformation: View {
                     .font(.body.monospaced())
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("Saved by macOS; may differ from the live connection. The record does not include colorimetry.")
+                Text("Historical record; not the live connection.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             case .unavailable:
-                Label("No usable record", systemImage: "questionmark.circle")
-                Text("macOS has not provided a complete connection record. The active format cannot be determined.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                Text("No saved connection record.")
             case .conflicting:
-                Label("Conflicting records", systemImage: "exclamationmark.triangle")
-                Text("macOS has multiple different records for this display. None is presented as the active format.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                Label("Saved records disagree.", systemImage: "exclamationmark.triangle")
             }
         }
     }
@@ -74,7 +73,7 @@ private struct SavedTargetInformation: View {
                 .font(.body.monospaced())
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("The old target cannot be reliably restored from its ID. Saving it did not apply a display mode.")
+            Text("This old target cannot be restored reliably.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -91,17 +90,13 @@ struct SupportedModeInformation: View {
 
     var body: some View {
         InformationGroup("Driver-reported modes") {
-            Label("Driver table · View only", systemImage: "info.circle")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
             if !hasCurrentTiming, !modes.isEmpty {
-                Text("Formats reported across all supported timings. The current timing is unknown.")
+                Text("All reported timings; the current timing is unknown.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Text("Colorimetry codes are shown as reported by the driver; their color space mapping is unverified.")
+            Text("Read-only driver values. Colorimetry mapping is unverified.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -165,7 +160,7 @@ private struct ReadOnlyModeRow: View {
             .textSelection(.enabled)
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 10)
+            .padding(.vertical, 6)
             .accessibilityHint("Read-only driver entry.")
     }
 }

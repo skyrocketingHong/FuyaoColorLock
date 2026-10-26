@@ -2,18 +2,13 @@ import AppKit
 import SwiftUI
 
 @MainActor
-final class PanelPresentation: ObservableObject {
-    @Published var selectedDisplayID: String?
-    @Published var size = PanelLayout.preferredSize
-}
-
-@MainActor
 final class MenuBarController: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private let popover = NSPopover()
     private let presentation = PanelPresentation()
     private let overrides = EDIDOverrideManager()
     private var monitor: DisplayGuard?
+    private var presentedContext: DisplayOpenContext?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         monitor = DisplayGuard()
@@ -49,19 +44,31 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
     }
 
     @objc private func togglePanel() {
+        let activation = ScreenActivationResolver.capture(event: NSApp.currentEvent,
+                                                         fallbackScreen: statusItem?.button?.window?.screen)
         if NSApp.currentEvent?.type == .rightMouseUp {
             popover.performClose(nil)
-            showContextMenu()
+            showContextMenu(activation: activation)
         } else if popover.isShown {
             popover.performClose(nil)
+            if !ScreenLocationPolicy.shouldCloseExistingPopover(current: presentedContext, incoming: activation.context) {
+                showPanel(activation: activation)
+            }
         } else {
-            showPanel()
+            showPanel(activation: activation)
         }
     }
 
-    @objc private func showPanel() {
+    @objc private func showPanelFromMenu(_ sender: NSMenuItem) {
+        guard let origin = sender.representedObject as? MenuActivation else { return }
+        showPanel(activation: origin.value)
+    }
+
+    private func showPanel(activation: ScreenActivation) {
         guard let button = statusItem?.button, let monitor else { return }
-        let size = PanelLayout.size(visibleFrame: button.window?.screen?.visibleFrame)
+        presentedContext = activation.context
+        presentation.beginPresentation(context: activation.context, displays: monitor.displays)
+        let size = PanelLayout.size(visibleFrame: activation.visibleFrame ?? button.window?.screen?.visibleFrame)
         presentation.size = size
 
         // Recreate the transient hosting tree so a previously used screen or
@@ -81,7 +88,8 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
 
     @objc private func screenParametersChanged() {
         guard popover.isShown, let controller = popover.contentViewController else { return }
-        let frame = controller.view.window?.screen?.visibleFrame
+        let frame = ScreenActivationResolver.currentVisibleFrame(for: presentedContext)
+            ?? controller.view.window?.screen?.visibleFrame
             ?? statusItem?.button?.window?.screen?.visibleFrame
         let size = PanelLayout.shrinking(popover.contentSize, toFit: frame)
         guard size != popover.contentSize else { return }
@@ -97,12 +105,13 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         popover.contentSize = size
     }
 
-    private func showContextMenu() {
+    private func showContextMenu(activation: ScreenActivation) {
         guard let statusItem, let button = statusItem.button else { return }
         let menu = NSMenu()
         menu.autoenablesItems = false
-        let open = menu.addItem(withTitle: String(localized: "Open"), action: #selector(showPanel), keyEquivalent: "")
+        let open = menu.addItem(withTitle: String(localized: "Open"), action: #selector(showPanelFromMenu(_:)), keyEquivalent: "")
         open.target = self
+        open.representedObject = MenuActivation(activation)
         let about = menu.addItem(withTitle: String(localized: "About Fuyao Color Lock…"), action: #selector(showAbout), keyEquivalent: "")
         about.target = self
         menu.addItem(.separator())
@@ -123,6 +132,12 @@ final class MenuBarController: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         let name = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "Fuyao Color Lock"
         NSApp.orderFrontStandardAboutPanel(options: [.applicationName: name])
+    }
+
+    private final class MenuActivation: NSObject {
+        let value: ScreenActivation
+
+        init(_ value: ScreenActivation) { self.value = value }
     }
 }
 
