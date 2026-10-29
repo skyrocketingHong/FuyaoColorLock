@@ -13,6 +13,7 @@ struct DisplayBackend {
     var now: () -> Date
     var displayIsAsleep: (CGDirectDisplayID) -> Bool? = { _ in nil }
     var sessionAvailable: () -> Bool? = { true }
+    var onlineDisplayIDs: () -> Set<CGDirectDisplayID>? = { nil }
 
     static var live: DisplayBackend {
         DisplayBackend(
@@ -34,6 +35,14 @@ struct DisplayBackend {
                     // This optional private hint is absent when unlocked on
                     // current macOS. Only a known true value suppresses writes.
                     && session["CGSSessionScreenIsLocked"] as? Bool != true
+            },
+            onlineDisplayIDs: {
+                var count: UInt32 = 0
+                guard CGGetOnlineDisplayList(0, nil, &count) == .success else { return nil }
+                guard count > 0 else { return [] }
+                var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+                guard CGGetOnlineDisplayList(count, &ids, &count) == .success else { return nil }
+                return Set(ids.prefix(Int(count)).filter { CGDisplayIsBuiltin($0) == 0 })
             }
         )
     }

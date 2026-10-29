@@ -13,6 +13,17 @@ struct DisplayWakeState {
     private var resumedInCurrentWindow = false
     private var lastAllAsleep = false
 
+    mutating func disconnected(at now: Date, renewRetryBudget: Bool) {
+        isSuspended = true
+        isKnownAsleep = false
+        hasRecoveryBoundary = hasRecoveryBoundary || renewRetryBudget
+        awakeSince = nil
+        settleUntil = nil
+        receivedWakeHint = false
+        resumedInCurrentWindow = false
+        recoveryDeadline = now.addingTimeInterval(45)
+    }
+
     mutating func sleepHint(at now: Date) {
         if !isSuspended {
             // willSleep can arrive before CGDisplayIsAsleep flips to true.

@@ -111,11 +111,16 @@ enum CoreDisplayModes {
         "/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_LAZY | RTLD_LOCAL)
 
     static func snapshot(for displayID: CGDirectDisplayID) -> LiveDisplayConnection? {
-        guard let display = displayObject(for: displayID),
-              let currentObject = object(display, "currentMode"),
-              let current = mode(currentObject),
-              let available = object(display, "availableModes") as? [NSObject] else { return nil }
-        let modes = available.compactMap(mode).sorted {
+        guard let display = displayObject(for: displayID) else { return nil }
+        return snapshot(of: display,
+            identityIsStable: DisplayCatalog.stableIdentity(for: displayID) != nil,
+            isAwake: CGDisplayIsAsleep(displayID) == 0)
+    }
+
+    static func snapshot(of display: NSObject, identityIsStable: @autoclosure () -> Bool,
+                         isAwake: @autoclosure () -> Bool) -> LiveDisplayConnection? {
+        guard let fresh = refreshedModes(of: display) else { return nil }
+        let modes = fresh.available.compactMap(mode).sorted {
             if $0.width != $1.width { return $0.width > $1.width }
             if $0.height != $1.height { return $0.height > $1.height }
             if $0.refreshRateHz != $1.refreshRateHz { return $0.refreshRateHz > $1.refreshRateHz }
@@ -123,10 +128,10 @@ enum CoreDisplayModes {
             return $0.id < $1.id
         }
         let uniqueIDs = Set(modes.map(\.id)).count == modes.count
-        let containsCurrent = modes.filter { $0 == current }.count == 1
-        return LiveDisplayConnection(currentMode: current, modes: uniqueIDs ? modes : [],
+        let containsCurrent = modes.filter { $0 == fresh.current }.count == 1
+        return LiveDisplayConnection(currentMode: fresh.current, modes: uniqueIDs ? modes : [],
             isWritable: uniqueIDs && containsCurrent && setter(on: display) != nil
-                && DisplayCatalog.stableIdentity(for: displayID) != nil && CGDisplayIsAsleep(displayID) == 0)
+                && identityIsStable() && isAwake())
     }
 
     @MainActor
@@ -137,24 +142,35 @@ enum CoreDisplayModes {
         guard CGDisplayIsAsleep(displayID) == 0,
               DisplayCatalog.stableIdentity(for: displayID) == expectedDisplayIdentity,
               let display = displayObject(for: displayID),
-              let currentObject = object(display, "currentMode"),
-              let current = mode(currentObject),
-              let available = object(display, "availableModes") as? [NSObject],
+              let fresh = refreshedModes(of: display),
               let implementation = setter(on: display) else { return .unavailable }
         switch NativeApplyPolicy.evaluate(target: target, expectedCurrent: expectedCurrent,
-                                           current: current, available: available.compactMap(mode), canSet: true,
+                                           current: fresh.current, available: fresh.available.compactMap(mode), canSet: true,
                                            identityMatches: true) {
         case .unavailable: return .unavailable
         case .alreadyCurrent: return .alreadyCurrent
         case .ready: break
         }
-        let candidates = available.filter { mode($0) == target }
+        let candidates = fresh.available.filter { mode($0) == target }
         guard candidates.count == 1, let selected = candidates.first,
               DisplayCatalog.stableIdentity(for: displayID) == expectedDisplayIdentity,
               CGDisplayIsAsleep(displayID) == 0 else { return .unavailable }
         typealias Setter = @convention(c) (AnyObject, Selector, AnyObject) -> Void
         unsafeBitCast(implementation, to: Setter.self)(display, NSSelectorFromString("setCurrentMode:"), selected)
         return .requested
+    }
+
+    private static func refreshedModes(of display: NSObject)
+        -> (current: NativeConnectionMode, available: [NSObject])? {
+        // CADisplay getters can keep returning the process-local cache after a
+        // link change. Refresh it before both snapshots and write preflight.
+        guard let method = checkedMethod(display, "update", result: "v") else { return nil }
+        typealias Refresh = @convention(c) (AnyObject, Selector) -> Void
+        unsafeBitCast(method_getImplementation(method), to: Refresh.self)(display, NSSelectorFromString("update"))
+        guard let currentObject = object(display, "currentMode"),
+              let current = mode(currentObject),
+              let available = object(display, "availableModes") as? [NSObject] else { return nil }
+        return (current, available)
     }
 
     private static func displayObject(for displayID: CGDirectDisplayID) -> NSObject? {

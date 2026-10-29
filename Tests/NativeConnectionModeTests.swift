@@ -9,7 +9,9 @@ struct NativeConnectionModeTests {
         try applyRequiresFreshTargetAndIdentity()
         try readbackNeedsStableCompleteAgreement()
         try mutationsAreSerialized()
-        print("Passed 5 native connection mode regressions.")
+        try snapshotsRefreshCachedNativeModes()
+        try snapshotsRejectMissingOrInvalidRefresh()
+        print("Passed 7 native connection mode regressions.")
     }
 
     private static func opaqueIdentifiersRetainAllBits() throws {
@@ -61,6 +63,43 @@ struct NativeConnectionModeTests {
         try expect(verifier.observe(target), "Two complete matching readbacks should confirm the system state")
     }
 
+    private static func snapshotsRefreshCachedNativeModes() throws {
+        let previous = MockNativeMode(id: 1, depth: 8)
+        let current = MockNativeMode(id: 2, depth: 10)
+        let display = RefreshableDisplay(current: previous, available: [previous])
+        display.liveCurrent = current
+        display.liveModes = [previous, current]
+        try expect(display.cachedCurrent === previous, "The fixture must start with a stale native cache")
+
+        let first = CoreDisplayModes.snapshot(of: display, identityIsStable: true, isAwake: true)
+        try expect(first?.currentMode == mode(id: 2, depth: 10),
+                   "A native snapshot must refresh currentMode before reading the cached getter")
+        try expect(first?.modes.count == 2 && first?.isWritable == true,
+                   "The same refresh must replace the cached availableModes list")
+        try expect(display.refreshes == 1 && display.getterReads == 2 && display.setterCalls == 0,
+                   "A snapshot must refresh once before both getters without invoking a setter")
+
+        display.liveCurrent = previous
+        display.liveModes = [previous]
+        let second = CoreDisplayModes.snapshot(of: display, identityIsStable: true, isAwake: true)
+        try expect(second?.currentMode == mode() && second?.modes.count == 1 && display.refreshes == 2,
+                   "Repeated readback must refresh the same long-lived object again")
+        try expect(display.setterCalls == 0, "Readback must never submit a mode change")
+    }
+
+    private static func snapshotsRejectMissingOrInvalidRefresh() throws {
+        let current = MockNativeMode(id: 1, depth: 8)
+        let missing = CachedDisplay(current: current, available: [current])
+        let invalid = InvalidRefreshDisplay(current: current, available: [current])
+        for display in [missing, invalid] {
+            try expect(CoreDisplayModes.snapshot(of: display, identityIsStable: true, isAwake: true) == nil,
+                       "An absent or wrong-ABI update cannot produce a fresh native snapshot")
+            try expect(display.getterReads == 0 && display.setterCalls == 0,
+                       "Failed refresh validation must reject the snapshot before reading cached getters")
+        }
+        try expect(invalid.refreshes == 0, "An update method with the wrong return ABI must not be invoked")
+    }
+
     @MainActor
     private static func mutationsAreSerialized() throws {
         try expect(DisplayMutationGate.begin(), "The first display operation should acquire the gate")
@@ -80,5 +119,74 @@ struct NativeConnectionModeTests {
 
     private static func expect(_ condition: Bool, _ message: String) throws {
         if !condition { throw Failure(message: message) }
+    }
+}
+
+private final class MockNativeMode: NSObject {
+    @objc let internalRepresentation: UInt64
+    @objc let width: UInt64 = 3840
+    @objc let height: UInt64 = 2160
+    @objc let refreshRate: Double = 60
+    @objc let bitDepth: UInt64
+    @objc let colorMode = "RGBFullRange"
+    @objc let colorGamut = "gamut_SRGB"
+    @objc let hdrMode = "SDR"
+    @objc let isVRR = false
+    @objc let isVirtual = false
+
+    init(id: UInt64, depth: UInt64) {
+        internalRepresentation = id
+        bitDepth = depth
+    }
+}
+
+private class CachedDisplay: NSObject {
+    var cachedCurrent: MockNativeMode
+    var cachedModes: [MockNativeMode]
+    var getterReads = 0
+    var setterCalls = 0
+
+    init(current: MockNativeMode, available: [MockNativeMode]) {
+        cachedCurrent = current
+        cachedModes = available
+    }
+
+    @objc func currentMode() -> NSObject {
+        getterReads += 1
+        return cachedCurrent
+    }
+
+    @objc func availableModes() -> NSArray {
+        getterReads += 1
+        return cachedModes as NSArray
+    }
+
+    @objc func setCurrentMode(_ mode: NSObject) { setterCalls += 1 }
+}
+
+private final class RefreshableDisplay: CachedDisplay {
+    var liveCurrent: MockNativeMode
+    var liveModes: [MockNativeMode]
+    var refreshes = 0
+
+    override init(current: MockNativeMode, available: [MockNativeMode]) {
+        liveCurrent = current
+        liveModes = available
+        super.init(current: current, available: available)
+    }
+
+    @objc func update() {
+        refreshes += 1
+        cachedCurrent = liveCurrent
+        cachedModes = liveModes
+    }
+}
+
+private final class InvalidRefreshDisplay: CachedDisplay {
+    var refreshes = 0
+
+    @objc func update() -> Bool {
+        refreshes += 1
+        return true
     }
 }

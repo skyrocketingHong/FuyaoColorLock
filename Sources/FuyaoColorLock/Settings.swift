@@ -5,7 +5,16 @@ struct DisplayPreference: Hashable {
 }
 
 enum Settings {
-    private static func modeLockKey(_ displayID: String) -> String { "nativeModeLock.v1.\(displayID)" }
+    private static let modeLockPrefix = "nativeModeLock.v1."
+    private static func modeLockKey(_ displayID: String) -> String { modeLockPrefix + displayID }
+
+    static func modeLockTargets(defaults: UserDefaults = .standard) -> [String: ModeLockTarget] {
+        defaults.dictionaryRepresentation().keys.reduce(into: [:]) { targets, key in
+            guard key.hasPrefix(modeLockPrefix) else { return }
+            let identity = String(key.dropFirst(modeLockPrefix.count))
+            if let target = modeLockTarget(for: identity, defaults: defaults) { targets[identity] = target }
+        }
+    }
 
     static func modeLockTarget(for displayID: String, defaults: UserDefaults = .standard) -> ModeLockTarget? {
         guard displayID.hasPrefix("uuid-"), let data = defaults.data(forKey: modeLockKey(displayID)),

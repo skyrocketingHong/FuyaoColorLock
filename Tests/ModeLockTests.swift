@@ -5,6 +5,12 @@ import Foundation
 struct ModeLockTests {
     @MainActor
     static func main() async throws {
+        try await schedulerDetectsDriftWithoutNotifications()
+        try await schedulerRecoversAfterLongLockedSession()
+        try await repeatedRefreshesDoNotPostponeRestoration()
+        try await schedulerFindsOfflineLocksAndRecoveredCatalogs()
+        try await writeInducedDisconnectionsDoNotRenewBudget()
+        try await anotherDisplaysWriteDoesNotSuppressReconnectRecovery()
         try await missingWakeNotificationDoesNotLatchSleeping()
         try await wakeHintsRequireStableHardwareReadiness()
         try await lockedSessionWaitsWithoutSpendingRetries()
@@ -18,6 +24,9 @@ struct ModeLockTests {
         try await defaultsAndPersistence()
         try await restoresDriftAndVerifies()
         try await reconnectsWithFreshIdentifiers()
+        try await confirmedReconnectRearmsAutomaticPauses()
+        try await confirmedReconnectPreservesManualPause()
+        try await failedCatalogReadDoesNotRearmAutomaticPause()
         try await refusesChangedTimingAndAmbiguousTargets()
         try await disablingDoesNotRescheduleSubmittedWrites()
         try await manualChangesUpdateOrPauseTheLock()
@@ -29,7 +38,153 @@ struct ModeLockTests {
         try await inFlightSleepWaitsForWake()
         try await readbackRejectsReusedDisplayIdentifiers()
         try await invalidPersistenceIsIgnored()
-        print("Passed 24 fake-backend mode lock regression groups. No native setter was called.")
+        print("Passed 33 fake-backend mode lock regression groups. No native setter was called.")
+    }
+
+    @MainActor
+    private static func schedulerDetectsDriftWithoutNotifications() async throws {
+        let fixture = Fixture()
+        defer { fixture.clean() }
+        let monitor = DisplayGuard(defaults: fixture.defaults, backend: fixture.hardware.backend,
+                                   startObserving: false, automaticScheduling: true)
+        let display = try fixture.display(in: monitor)
+        monitor.setModeLock(true, for: display)
+        fixture.hardware.records[0].current = mode(id: 2, format: "RGBLimitedRange")
+        let deadline = Date().addingTimeInterval(2.5)
+        while fixture.hardware.writes.isEmpty && Date() < deadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try expect(fixture.hardware.writes.count == 1 && monitor.lockState(for: display).phase == .matching,
+                   "The actual scheduler must detect and restore a locked-mode drift without a display notification")
+        monitor.setModeLock(false, for: display)
+        fixture.hardware.records[0].current = mode(id: 2, format: "RGBLimitedRange")
+        try await Task.sleep(nanoseconds: 1_300_000_000)
+        try expect(fixture.hardware.writes.count == 1, "Disabling the last lock must stop automatic monitoring writes")
+    }
+
+    @MainActor
+    private static func schedulerRecoversAfterLongLockedSession() async throws {
+        let fixture = Fixture()
+        defer { fixture.clean() }
+        let monitor = DisplayGuard(defaults: fixture.defaults, backend: fixture.hardware.backend,
+                                   startObserving: false, automaticScheduling: true)
+        let display = try fixture.display(in: monitor)
+        monitor.setModeLock(true, for: display)
+        fixture.hardware.sessionAvailable = false
+        monitor.setSleeping(false)
+        fixture.hardware.now.addTimeInterval(60)
+        monitor.reload()
+        fixture.hardware.records[0].current = mode(id: 2, format: "RGBLimitedRange")
+        fixture.hardware.sessionAvailable = true
+        let deadline = Date().addingTimeInterval(3.5)
+        while fixture.hardware.writes.isEmpty && Date() < deadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+            fixture.hardware.now.addTimeInterval(0.05)
+        }
+        try expect(fixture.hardware.writes.count == 1,
+                   "Unlocking after the wake window expires must recover without a new wake notification or manual refresh")
+        monitor.setModeLock(false, for: display)
+    }
+
+    @MainActor
+    private static func repeatedRefreshesDoNotPostponeRestoration() async throws {
+        let fixture = Fixture()
+        defer { fixture.clean() }
+        let monitor = DisplayGuard(defaults: fixture.defaults, backend: fixture.hardware.backend,
+                                   startObserving: false, automaticScheduling: true)
+        let display = try fixture.display(in: monitor)
+        monitor.setModeLock(true, for: display)
+        fixture.hardware.records[0].current = mode(id: 2, format: "RGBLimitedRange")
+        let deadline = Date().addingTimeInterval(1.5)
+        while fixture.hardware.writes.isEmpty && Date() < deadline {
+            monitor.reload()
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        try expect(fixture.hardware.writes.count == 1,
+                   "Frequent catalog refreshes must preserve the first eligible restoration deadline")
+        monitor.setModeLock(false, for: display)
+    }
+
+    @MainActor
+    private static func schedulerFindsOfflineLocksAndRecoveredCatalogs() async throws {
+        for initiallyOffline in [true, false] {
+            let fixture = Fixture()
+            defer { fixture.clean() }
+            Settings.setModeLockTarget(ModeLockTarget(mode()), for: "uuid-test-a", defaults: fixture.defaults)
+            fixture.hardware.records[0].online = !initiallyOffline
+            let monitor = DisplayGuard(defaults: fixture.defaults, backend: fixture.hardware.backend,
+                                       startObserving: false, automaticScheduling: true)
+            if !initiallyOffline {
+                fixture.hardware.snapshotFails = true
+                monitor.reload()
+                fixture.hardware.snapshotFails = false
+            }
+            try expect(monitor.lockStates["uuid-test-a"]?.isEnabled == true,
+                       "A saved offline lock remains monitored even before its display is enumerated")
+            fixture.hardware.records[0].online = true
+            fixture.hardware.records[0].current = mode(id: 2, format: "RGBLimitedRange")
+            let deadline = Date().addingTimeInterval(3.5)
+            while fixture.hardware.writes.isEmpty && Date() < deadline {
+                try await Task.sleep(nanoseconds: 50_000_000)
+                fixture.hardware.now.addTimeInterval(0.05)
+            }
+            try expect(fixture.hardware.writes.count == 1,
+                       "The scheduler must discover reconnected locks or a recovered catalog without a notification")
+            monitor.setModeLock(false, for: try fixture.display(in: monitor))
+        }
+    }
+
+    @MainActor
+    private static func writeInducedDisconnectionsDoNotRenewBudget() async throws {
+        let fixture = Fixture()
+        defer { fixture.clean() }
+        let monitor = fixture.monitor()
+        let display = try fixture.display(in: monitor)
+        monitor.setModeLock(true, for: display)
+        for _ in 0..<5 {
+            fixture.hardware.records[0].current = mode(id: 2, format: "RGBLimitedRange")
+            fixture.hardware.onWait = { _ in fixture.hardware.records[0].online = false }
+            await monitor.reconcileModeLocks()
+            fixture.hardware.onWait = nil
+            fixture.hardware.records[0].online = true
+            monitor.reload()
+            fixture.hardware.now.addTimeInterval(1)
+            monitor.reload()
+        }
+        try expect(fixture.hardware.writes.count == 3 && monitor.lockState(for: display).phase == .paused,
+                   "Temporary disappearance during a submitted mode change must not renew that write's rate budget")
+    }
+
+    @MainActor
+    private static func anotherDisplaysWriteDoesNotSuppressReconnectRecovery() async throws {
+        let fixture = Fixture()
+        defer { fixture.clean() }
+        let monitor = fixture.monitor()
+        let first = try fixture.display(in: monitor)
+        monitor.setModeLock(true, for: first)
+        fixture.hardware.records[0].current = mode(id: 2, format: "RGBLimitedRange")
+        fixture.hardware.appliesRequests = false
+        for delay in [0.0, 5, 15] {
+            fixture.hardware.now.addTimeInterval(delay)
+            await monitor.reconcileModeLocks()
+        }
+        try expect(monitor.lockState(for: first).phase == .paused, "The first display must reach an automatic pause")
+        fixture.hardware.records.append(FakeHardware.Record(identity: "uuid-test-b", cgID: 102))
+        monitor.reload()
+        let second = try require(monitor.displays.first { $0.id == "uuid-test-b" }, "Expected a second display")
+        monitor.setModeLock(true, for: second)
+        fixture.hardware.records[1].current = mode(id: 2, format: "RGBLimitedRange")
+        fixture.hardware.appliesRequests = true
+        fixture.hardware.onWait = { _ in fixture.hardware.records[0].online = false }
+        await monitor.reconcileModeLocks()
+        try expect(monitor.lockState(for: second).phase == .matching, "The second display finishes its own recovery")
+        fixture.hardware.onWait = nil
+        fixture.hardware.records[0].online = true
+        monitor.reload()
+        fixture.hardware.now.addTimeInterval(1)
+        await monitor.reconcileModeLocks()
+        try expect(fixture.hardware.writes.count == 5 && monitor.lockState(for: first).phase == .matching,
+                   "A different display's in-flight write must not suppress this display's reconnect recovery")
     }
 
     @MainActor
@@ -338,9 +493,107 @@ struct ModeLockTests {
         fixture.hardware.records[0].cgID = 202
         fixture.hardware.records[0].current = mode(id: 502, format: "RGBLimitedRange")
         fixture.hardware.records[0].modes = [mode(id: 501), mode(id: 502, format: "RGBLimitedRange")]
+        monitor.reload()
+        fixture.hardware.now.addTimeInterval(1)
         await monitor.reconcileModeLocks()
         let write = try require(fixture.hardware.writes.first, "Reconnect should restore the available semantic target")
         try expect(write.cgID == 202 && write.mode.id == 501, "Restoration must use freshly enumerated display and native IDs")
+    }
+
+    @MainActor
+    private static func confirmedReconnectRearmsAutomaticPauses() async throws {
+        for failurePause in [true, false] {
+            let fixture = Fixture()
+            defer { fixture.clean() }
+            let monitor = fixture.monitor()
+            let display = try fixture.display(in: monitor)
+            monitor.setModeLock(true, for: display)
+            fixture.hardware.appliesRequests = !failurePause
+            for delay in failurePause ? [0.0, 5, 15] : [0.0, 0, 0, 0] {
+                fixture.hardware.now.addTimeInterval(delay)
+                fixture.hardware.records[0].current = mode(id: 2, format: "RGBLimitedRange")
+                await monitor.reconcileModeLocks()
+            }
+            try expect(fixture.hardware.writes.count == 3 && monitor.lockState(for: display).phase == .paused,
+                       "Fixture must reach an automatic failure or rate-limit pause")
+
+            fixture.hardware.records[0].online = false
+            monitor.reload()
+            fixture.hardware.now.addTimeInterval(120)
+            fixture.hardware.records[0].online = true
+            fixture.hardware.records[0].cgID = 202
+            fixture.hardware.records[0].current = mode(id: 502, format: "RGBLimitedRange")
+            fixture.hardware.records[0].modes = [mode(id: 501), mode(id: 502, format: "RGBLimitedRange")]
+            fixture.hardware.appliesRequests = true
+            await monitor.reconcileModeLocks()
+            try expect(fixture.hardware.writes.count == 3,
+                       "A reconnect must wait for stable readiness before rearming writes")
+            fixture.hardware.now.addTimeInterval(1)
+            await monitor.reconcileModeLocks()
+            try expect(fixture.hardware.writes.count == 4 && monitor.lockState(for: display).phase == .matching,
+                       "A confirmed offline/online transition must rearm an automatic pause without a wake notification")
+            try expect(fixture.hardware.writes.last?.cgID == 202 && fixture.hardware.writes.last?.mode.id == 501,
+                       "Reconnected restoration must use the fresh display and mode identifiers")
+
+            for _ in 0..<3 {
+                fixture.hardware.records[0].current = mode(id: 502, format: "RGBLimitedRange")
+                await monitor.reconcileModeLocks()
+            }
+            try expect(fixture.hardware.writes.count == 6 && monitor.lockState(for: display).phase == .paused,
+                       "One confirmed reconnect grants only one bounded automatic retry budget")
+        }
+    }
+
+    @MainActor
+    private static func confirmedReconnectPreservesManualPause() async throws {
+        let fixture = Fixture()
+        defer { fixture.clean() }
+        let monitor = fixture.monitor()
+        let display = try fixture.display(in: monitor)
+        monitor.setModeLock(true, for: display)
+        fixture.hardware.appliesRequests = false
+        await monitor.apply(mode(id: 2, format: "RGBLimitedRange"), to: display)
+        try expect(monitor.lockState(for: display).phase == .paused, "Fixture must reach a manual-change pause")
+        let count = fixture.hardware.writes.count
+        fixture.hardware.records[0].online = false
+        monitor.reload()
+        fixture.hardware.now.addTimeInterval(120)
+        fixture.hardware.records[0].online = true
+        fixture.hardware.records[0].cgID = 202
+        fixture.hardware.records[0].current = mode(id: 502, format: "RGBLimitedRange")
+        fixture.hardware.records[0].modes = [mode(id: 501), mode(id: 502, format: "RGBLimitedRange")]
+        fixture.hardware.appliesRequests = true
+        monitor.reload()
+        fixture.hardware.now.addTimeInterval(1)
+        await monitor.reconcileModeLocks()
+        try expect(fixture.hardware.writes.count == count && monitor.lockState(for: display).phase == .paused,
+                   "A physical reconnect must preserve an unconfirmed manual-change pause")
+    }
+
+    @MainActor
+    private static func failedCatalogReadDoesNotRearmAutomaticPause() async throws {
+        let fixture = Fixture()
+        defer { fixture.clean() }
+        let monitor = fixture.monitor()
+        let display = try fixture.display(in: monitor)
+        monitor.setModeLock(true, for: display)
+        fixture.hardware.records[0].current = mode(id: 2, format: "RGBLimitedRange")
+        fixture.hardware.appliesRequests = false
+        for delay in [0.0, 5, 15] {
+            fixture.hardware.now.addTimeInterval(delay)
+            await monitor.reconcileModeLocks()
+        }
+        try expect(monitor.lockState(for: display).phase == .paused, "Fixture must reach automatic failure pause")
+        fixture.hardware.snapshotFails = true
+        monitor.reload()
+        fixture.hardware.now.addTimeInterval(120)
+        fixture.hardware.snapshotFails = false
+        fixture.hardware.appliesRequests = true
+        monitor.reload()
+        fixture.hardware.now.addTimeInterval(1)
+        await monitor.reconcileModeLocks()
+        try expect(fixture.hardware.writes.count == 3 && monitor.lockState(for: display).phase == .paused,
+                   "A failed catalog read is unknown availability, not evidence of a physical reconnect")
     }
 
     @MainActor
@@ -499,6 +752,8 @@ struct ModeLockTests {
         fixture.hardware.onWait = nil
         fixture.hardware.records[0].online = true
         fixture.hardware.records[0].current = mode(id: 2, format: "RGBLimitedRange")
+        monitor.reload()
+        fixture.hardware.now.addTimeInterval(1)
         await monitor.reconcileModeLocks()
         try expect(fixture.hardware.writes.count == 2, "Reconnect after missing readback does not inherit a failure backoff")
     }
@@ -642,9 +897,12 @@ private final class FakeHardware {
     var sessionAvailable: Bool? = true
     var rejectsRequests = false
     var requestCount = 0
+    var snapshotFails = false
 
     var backend: DisplayBackend {
-        DisplayBackend(snapshot: { [self] in .success(records.filter(\.online).map(display)) },
+        DisplayBackend(snapshot: { [self] in
+                snapshotFails ? .failure(.onlineDisplaysUnavailable) : .success(records.filter(\.online).map(display))
+            },
             identity: { [self] id in records.first { $0.online && $0.cgID == id }?.identity },
             connection: { [self] id in records.first { $0.online && $0.cgID == id }.flatMap(connection) },
             requestApply: { [self] target, id, expected, identity in
@@ -666,7 +924,8 @@ private final class FakeHardware {
                 onWait?(waitCount)
             }, now: { [self] in now },
             displayIsAsleep: { [self] id in records.first { $0.online && $0.cgID == id }?.asleep },
-            sessionAvailable: { [self] in sessionAvailable })
+            sessionAvailable: { [self] in sessionAvailable },
+            onlineDisplayIDs: { [self] in Set(records.filter(\.online).map(\.cgID)) })
     }
 
     private func connection(_ record: Record) -> LiveDisplayConnection? {
