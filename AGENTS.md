@@ -68,5 +68,6 @@
 
 ## 版本和发布
 
+- 项目许可证为 GNU Affero General Public License v3.0（`AGPL-3.0-only`）；根目录 `LICENSE` 保留完整原文，中英文 README 许可声明保持一致。
 - 营销版本保持两段，当前 1.0；`CFBundleVersion` 单调递增，当前 7。
 - 每个已验证阶段建立范围明确的英文 Conventional Commit；默认不 push、不发布 Release，不提交 build、反编二进制、日志或真实设备数据。

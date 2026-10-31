@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/macOS-13.0%2B-000000?logo=macos" alt="macOS 13.0 或更高">
   <img src="https://img.shields.io/badge/version-1.0-4F6B00" alt="版本 1.0">
   <img src="https://img.shields.io/badge/Swift-6-FA7343?logo=swift&logoColor=white" alt="Swift 6">
-  <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT 许可证">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="GNU Affero General Public License v3.0"></a>
 </p>
 
 Fuyao Color Lock 读取系统当前连接模式，并通过原生显示 API 请求切换支持的格式。面板将实时模式、驱动公布的能力和 macOS 历史配置记录分开展示。
@@ -164,7 +164,7 @@ Tests/                   离线回归数据和断言
 
 ## 许可证
 
-MIT。
+本项目采用 [GNU Affero General Public License v3.0](LICENSE)（`AGPL-3.0-only`）许可证。
 
 ---
 

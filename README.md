@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/macOS-13.0%2B-000000?logo=macos" alt="macOS 13.0 or later">
   <img src="https://img.shields.io/badge/version-1.0-4F6B00" alt="Version 1.0">
   <img src="https://img.shields.io/badge/Swift-6-FA7343?logo=swift&logoColor=white" alt="Swift 6">
-  <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="GNU Affero General Public License v3.0"></a>
 </p>
 
 Fuyao Color Lock reads live system connection modes and can request a supported format change through the native display API. The panel separates live mode information, driver-advertised capabilities and older macOS configuration records.
@@ -164,7 +164,7 @@ Display information and preferences stay local. The app reads IORegistry, CoreGr
 
 ## License
 
-MIT.
+This project is licensed under the [GNU Affero General Public License v3.0](LICENSE) (`AGPL-3.0-only`).
 
 ---
 
